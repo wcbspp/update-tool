@@ -1669,7 +1669,7 @@ function showBusy(msg) {
     $('res').innerHTML = `<div class="busy">
       <div class="spin"></div>
       <div class="busyT">${esc(msg)}</div>
-      <div class="busyS">已用 ${sec} 秒 · 大表统计可能要几十秒，请稍等</div>
+      <div class="busyS">已用 ${sec} 秒 · 大表统计可能需要几分钟；若被 DQL 超时打断，会显示「未计算」</div>
     </div>`;
   };
   paint();

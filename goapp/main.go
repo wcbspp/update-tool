@@ -578,12 +578,78 @@ func isDDL(s string) bool {
 
 func isQuery(s string) bool {
 	t := strings.ToUpper(strings.TrimSpace(s))
-	for _, p := range []string{"SELECT", "SHOW", "DESC", "DESCRIBE", "EXPLAIN", "WITH", "TABLE"} {
+	if strings.HasPrefix(t, "WITH") {
+		// CTE 后面接的可能是 UPDATE/DELETE，不能一律当查询（否则 affected 会报 0）
+		return firstDMLIsSelect(s)
+	}
+	for _, p := range []string{"SELECT", "SHOW", "DESC", "DESCRIBE", "EXPLAIN", "TABLE"} {
 		if strings.HasPrefix(t, p) {
 			return true
 		}
 	}
 	return false
+}
+
+// firstDMLIsSelect：跳过 CTE/括号，找到顶层第一个 DML 关键字，判断是不是 SELECT
+func firstDMLIsSelect(s string) bool {
+	rs := []rune(s)
+	depth, inS, inD, inBt := 0, false, false, false
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		switch {
+		case inS:
+			if c == '\\' {
+				i++
+			} else if c == '\'' {
+				inS = false
+			}
+			continue
+		case inD:
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				inD = false
+			}
+			continue
+		case inBt:
+			if c == '`' {
+				inBt = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inS = true
+			continue
+		case '"':
+			inD = true
+			continue
+		case '`':
+			inBt = true
+			continue
+		case '(':
+			depth++
+			continue
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth != 0 || c > 'z' || c < 'A' {
+			continue
+		}
+		for _, kw := range []string{"SELECT", "UPDATE", "INSERT", "DELETE", "REPLACE"} {
+			if i+len(kw) <= len(rs) && strings.EqualFold(string(rs[i:i+len(kw)]), kw) {
+				prevOK := i == 0 || !isWordRune(rs[i-1])
+				nextOK := i+len(kw) == len(rs) || !isWordRune(rs[i+len(kw)])
+				if prevOK && nextOK {
+					return kw == "SELECT"
+				}
+			}
+		}
+	}
+	return true
 }
 
 func isTxnControl(s string) bool {
@@ -619,6 +685,8 @@ func preview(s string) string {
 
 /* ---------------- 数据库 ---------------- */
 
+var sessWarnOnce sync.Once
+
 // sessInitConnector：每条新连接建好后设置 SELECT 超时（5.7.8 以下/代理不支持时忽略错误）
 type sessInitConnector struct {
 	base driver.Connector
@@ -632,7 +700,11 @@ func (c sessInitConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	}
 	if c.ms > 0 {
 		if ex, ok := conn.(driver.ExecerContext); ok {
-			_, _ = ex.ExecContext(ctx, fmt.Sprintf("SET SESSION max_execution_time = %d", c.ms), nil)
+			if _, err := ex.ExecContext(ctx, fmt.Sprintf("SET SESSION max_execution_time = %d", c.ms), nil); err != nil {
+				sessWarnOnce.Do(func() {
+					log.Printf("提示：服务端不支持 max_execution_time（%v），预检将只靠客户端超时兜底", err)
+				})
+			}
 		}
 	}
 	return conn, nil
@@ -678,10 +750,10 @@ var runMu sync.Mutex
 
 type cell = any
 
-func scanRows(rows *sql.Rows) ([]string, [][]cell, error) {
+func scanRows(rows *sql.Rows) ([]string, [][]cell, bool, error) {
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	out := [][]cell{}
 	for rows.Next() {
@@ -691,7 +763,7 @@ func scanRows(rows *sql.Rows) ([]string, [][]cell, error) {
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		line := make([]cell, len(cols))
 		for i, v := range vals {
@@ -709,15 +781,21 @@ func scanRows(rows *sql.Rows) ([]string, [][]cell, error) {
 			break
 		}
 	}
-	return cols, out, rows.Err()
+	truncated := false
+	if len(out) >= maxRows && rows.Next() {
+		truncated = true // 还有更多行，只是不展示
+	}
+	return cols, out, truncated, rows.Err()
 }
 
 type stmtResult struct {
-	Affected int64    `json:"affected"`
-	Info     string   `json:"info,omitempty"`
-	Columns  []string `json:"columns,omitempty"`
-	Rows     [][]cell `json:"rows"`
-	MS       int64    `json:"ms"`
+	Affected   int64    `json:"affected"`
+	RolledBack bool     `json:"rolledBack,omitempty"`
+	Info       string   `json:"info,omitempty"`
+	Columns    []string `json:"columns,omitempty"`
+	Rows       [][]cell `json:"rows"`
+	Truncated  bool     `json:"truncated,omitempty"`
+	MS         int64    `json:"ms"`
 }
 
 func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResult, int, string, int64) {
@@ -749,6 +827,12 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 
 	fail := func(i int, e error) (map[string]stmtResult, int, string, int64) {
 		_ = tx.Rollback()
+		// 整批已回滚：前面语句的“变更行数”不能留在结果和合计里
+		for k, r := range res {
+			r.Affected = 0
+			r.RolledBack = true
+			res[k] = r
+		}
 		return res, i, withHint(e.Error()), time.Since(start).Milliseconds()
 	}
 
@@ -761,7 +845,7 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 				cancel()
 				return fail(i, err)
 			}
-			cols, data, err := scanRows(rows)
+			cols, data, truncated, err := scanRows(rows)
 			rows.Close()
 			cancel()
 			if err != nil {
@@ -770,7 +854,7 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 			if data == nil {
 				data = [][]cell{}
 			}
-			res[strconv.Itoa(i)] = stmtResult{Columns: cols, Rows: data, MS: time.Since(t0).Milliseconds()}
+			res[strconv.Itoa(i)] = stmtResult{Columns: cols, Rows: data, Truncated: truncated, MS: time.Since(t0).Milliseconds()}
 		} else {
 			r, err := tx.ExecContext(sctx, st)
 			if err != nil {
@@ -830,21 +914,30 @@ var (
 	reUpdate = regexp.MustCompile(`(?is)^\s*update\s+(.+?)\s+set\s+(.+)$`)
 	reDelete = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)`)
 	// DELETE t1, t2 FROM ... 与 DELETE FROM t USING ...
-	reDeleteMulti = regexp.MustCompile(`(?is)^\s*delete\s+(.+?)\s+from\s+`)
-	reDeleteUsing = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)[\x60"]?\s+using\s+`)
-	reIdent       = regexp.MustCompile(`^[\x60"]?([\w$.]+)[\x60"]?`)
-	reBatch       = regexp.MustCompile(`(?i)([A-Za-z0-9_]+)_update_([A-Za-z0-9]+)`)
+	reDeleteMulti = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*(.+?)\s+from\s+`)
+	// 单表：DELETE [修饰词] FROM t [AS a] 后面直接是 WHERE/ORDER/LIMIT/结尾，
+	// 不能再有 from（否则是子查询，属于单表语句，不是多表 DELETE）
+	reDeleteSingle = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*from\s+[\x60"]?[\w$.]+[\x60"]?\s*(?:as\s+[\x60"]?[\w$]+[\x60"]?)?\s*(?:where\b|order\s+by\b|limit\b|;?\s*$)`)
+	reDeleteUsing  = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)[\x60"]?\s+using\s+`)
+	reIdent        = regexp.MustCompile(`^[\x60"]?([\w$.]+)[\x60"]?`)
+	reBatch        = regexp.MustCompile(`(?i)([A-Za-z0-9_]+)_update_([A-Za-z0-9]+)`)
 )
 
 // 5.6 / Linux 下表名区分大小写，先按不区分大小写解析出真实表名
 func resolveTable(db *sql.DB, schema, name string) string {
+	n, _ := resolveTableOK(db, schema, name)
+	return n
+}
+
+// 第二返回值表示「查到了真实表名」；查不到（超时/中间件限制）时不要缓存，下次重试
+func resolveTableOK(db *sql.DB, schema, name string) (string, bool) {
 	var actual string
 	err := db.QueryRow(`SELECT TABLE_NAME FROM information_schema.TABLES
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) LIMIT 1`, schema, name).Scan(&actual)
 	if err == nil && actual != "" {
-		return actual
+		return actual, true
 	}
-	return name
+	return name, false
 }
 
 func normTable(n string) string {
@@ -1328,10 +1421,12 @@ func mResolveTable(db *sql.DB, schema, name string) string {
 		return n
 	}
 	mc.mu.Unlock()
-	n := resolveTable(db, schema, name)
-	mc.mu.Lock()
-	e.name, e.gotN = n, true
-	mc.mu.Unlock()
+	n, ok := resolveTableOK(db, schema, name)
+	if ok { // 失败不缓存，避免一次抖动把整次预检的表名固化错
+		mc.mu.Lock()
+		e.name, e.gotN = n, true
+		mc.mu.Unlock()
+	}
 	return n
 }
 
@@ -2296,6 +2391,18 @@ func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 				"。如果这是你在客户端里的删改，记得 COMMIT；否则工具（另一个会话）看到的仍是提交前的数据",
 		})
 	}
+	// 没有 PROCESSLIST 权限时 JOIN 会返回 0 行但不报错：再数一次总量，避免整类静默
+	if len(out) == 0 {
+		cctx, ccancel := pfCtx(pfSec)
+		defer ccancel()
+		var total int
+		if e := db.QueryRowContext(cctx, `SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_rows_modified > 0`).Scan(&total); e == nil && total > 0 {
+			out = append(out, map[string]any{
+				"stmt": -1, "level": "warn", "title": "有未提交事务",
+				"detail": fmt.Sprintf("库里有 %d 个事务改了行还没提交，但读不到明细（可能没有 PROCESSLIST 权限）；工具看到的可能是提交前的数据", total),
+			})
+		}
+	}
 	return out
 }
 
@@ -2505,7 +2612,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				// 单表 UPDATE：没有外部数据源，但目标表相关的检查仍然要做
 				if len(refs) == 1 {
 					r := refs[0]
-					if !reWhereWord.MatchString(st) {
+					if whereTail(st) == "" {
 						add(i, "error", "没有 WHERE 条件", "这条 UPDATE 会更新整张表，请确认不是笔误（确实要全表更新请写成 WHERE 1=1）")
 					}
 					for _, col := range unqual {
@@ -2550,7 +2657,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 			}
 
-			if !reWhereWord.MatchString(st) {
+			if whereTail(st) == "" {
 				add(i, "error", "没有 WHERE 条件", "这条 UPDATE 会更新整张表，请确认不是笔误（确实要全表更新请改成 WHERE 1=1 再跑）")
 			}
 			for _, col := range unqual {
@@ -2664,10 +2771,29 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			case reDeleteUsing.MatchString(st):
 				mm := reDeleteUsing.FindStringSubmatch(st)
 				targets = append(targets, mResolveTable(db, schema, normTable(mm[1])))
+				multi = true // USING 的 WHERE 通常引用关联表，单表计数必然失败，走 EXPLAIN
+			case reDeleteSingle.MatchString(st), reDelete.MatchString(st) && !reDeleteMulti.MatchString(st):
+				// 单表（WHERE 里可以有子查询）
+				mm := reDeleteUsing.FindStringSubmatch(st)
+				_ = mm
+				m := reDelete.FindStringSubmatch(st)
+				if m == nil {
+					continue
+				}
+				targets = append(targets, mResolveTable(db, schema, normTable(m[1])))
 				countTable = targets[0]
-				multi = true
 			case reDeleteMulti.MatchString(st):
 				mm := reDeleteMulti.FindStringSubmatch(st)
+				if strings.Contains(mm[1], "(") {
+					// 括号里的 from 是子查询，不是多表写法
+					m := reDelete.FindStringSubmatch(st)
+					if m == nil {
+						continue
+					}
+					targets = append(targets, mResolveTable(db, schema, normTable(m[1])))
+					countTable = targets[0]
+					break
+				}
 				for _, part := range splitTopLevel(mm[1]) {
 					if t, _ := parseTableRef(part); t != "" {
 						targets = append(targets, mResolveTable(db, schema, t))
@@ -2689,6 +2815,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 			if multi {
 				add(i, "warn", "多表 DELETE", "按关联条件删除，行数受关联结果影响，预检不做精确统计，请自行确认范围")
+				if n, ok := estimateByExplain(db, st, targets[0], ""); ok {
+					add(i, "warn", "预计影响行数", fmt.Sprintf("约 %d 行（按执行计划估算）", n))
+				}
 			}
 			if whereTail(st) == "" {
 				if lim > 0 {
@@ -2734,14 +2863,14 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				continue
 			}
 			switch {
-			case pp.lim > 0 && (r.capped || r.n <= pp.lim):
+			case pp.lim > 0 && r.capped:
+				addD(pp.i, "warn", "预计影响行数", fmt.Sprintf("至少 %d 行匹配，最多删 %d 行（LIMIT %d）", r.n, pp.lim, pp.lim), r.dur)
+			case pp.lim > 0:
 				hit := pp.lim
-				if !r.capped && r.n < pp.lim {
+				if r.n < pp.lim {
 					hit = r.n
 				}
 				addD(pp.i, "ok", "预计影响行数", fmt.Sprintf("预计删除 %d 行（LIMIT %d，精确计数）", hit, pp.lim), r.dur)
-			case pp.lim > 0:
-				addD(pp.i, "warn", "预计影响行数", fmt.Sprintf("匹配 %d 行，本次只删 %d 行（LIMIT %d）", r.n, pp.lim, pp.lim), r.dur)
 			case r.capped:
 				addD(pp.i, "warn", "预计影响行数", fmt.Sprintf("至少 %d 行（数到 30 万就停了，实际可能更多）", r.n), r.dur)
 			default:

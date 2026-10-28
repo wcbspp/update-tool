@@ -1734,7 +1734,7 @@ function renderRun(r, dryRun, warnN, versions) {
     let meta = '';
     if (failed) meta = '失败';
     else if (skipped) meta = '未执行';
-    else if (x && x.columns) meta = `${(x.rows || []).length} 行` + (x.ms ? ` · ${x.ms}ms` : '');
+    else if (x && x.columns) meta = `${(x.rows || []).length} 行` + (x.truncated ? '（仅显示前 500 行）' : '') + (x.ms ? ` · ${x.ms}ms` : '');
     else if (x) { meta = `变更 ${x.affected || 0} 行` + (x.ms ? ` · ${x.ms}ms` : ''); total += x.affected || 0; }
     else meta = '—';
 

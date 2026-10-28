@@ -3179,12 +3179,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": "所属数据源还没配全"})
 			return
 		}
+		chkStart := time.Now()
 		results, allOK := checkStatements(ds, stmts)
 		previews := make([]string, len(stmts))
 		for i, st := range stmts {
 			previews[i] = preview(st)
 		}
-		writeJSON(w, 200, map[string]any{"ok": allOK, "results": results, "count": len(stmts), "previews": previews})
+		writeJSON(w, 200, map[string]any{"ok": allOK, "results": results, "count": len(stmts),
+			"previews": previews, "ms": time.Since(chkStart).Milliseconds()})
 
 	case r.Method == http.MethodPost && p == "/api/run":
 		var b struct {

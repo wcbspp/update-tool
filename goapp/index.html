@@ -611,6 +611,13 @@
     font-size:12.5px;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;z-index:85;
     box-shadow:0 10px 28px -12px #000}
   .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  .busy{display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:10px;height:100%;min-height:120px}
+  .spin{width:26px;height:26px;border:3px solid #24334a;border-top-color:#5aa9ff;
+    border-radius:50%;animation:spn .9s linear infinite}
+  @keyframes spn{to{transform:rotate(360deg)}}
+  .busyT{font-size:13.5px;color:#e8eef7}
+  .busyS{font-size:11.5px;color:#9fb0c6}
 </style>
 </head>
 <body>
@@ -1536,6 +1543,7 @@ function renderPreflight(r) {
     <span class="badge ${errs ? 'bad' : warns ? 'warn' : 'ok'}">${errs ? '有异常' : warns ? '有提醒' : '预检通过'}</span>
     <span class="chip">数据预检</span>
     <span class="chip">${r.count || 0} 条语句</span>
+    <span class="chip" title="预检耗时">${r.ms != null ? r.ms + ' ms' : '—'}</span>
     ${r.selOnly ? '<span class="chip" style="color:#e0a33a">仅选中部分</span>' : ''}
     ${errs ? `<span class="chip clickable" style="color:#ff9a9a" onclick="jumpToFirst('error')" title="跳到第一个错误">${errs} 个错误 ↗</span>` : ''}
     ${warns ? `<span class="chip clickable" style="color:#e0a33a" onclick="jumpToFirst('warn')" title="跳到第一个提醒">${warns} 个提醒 ↗</span>` : ''}
@@ -1591,6 +1599,7 @@ function renderCheck(r) {
     <span class="badge ${r.ok ? 'ok' : 'bad'}">${r.ok ? '通过' : '有问题'}</span>
     <span class="chip">语法校验 · EXPLAIN</span>
     <span class="chip">${r.count || list.length} 条语句</span>
+    <span class="chip" title="校验耗时">${r.ms != null ? r.ms + ' ms' : '—'}</span>
     ${bad ? `<span class="chip" style="color:#ff9a9a">${bad} 条失败</span>` : ''}
     ${RES_ACTIONS}
   </div>`;
@@ -1651,8 +1660,25 @@ async function run(dryRun) {
     toast(r.ok ? '执行完成' : '执行失败，已回滚', r.ok ? 'ok' : 'bad');
   } catch (e) { showErr(e.message); toast(e.message, 'bad'); }
 }
+let BUSY_TIMER = null, BUSY_T0 = 0;
+
 function showBusy(msg) {
-  $('res').innerHTML = `<div class="rhead"><span class="chip">${esc(msg)}</span></div>`;
+  BUSY_T0 = Date.now();
+  const paint = () => {
+    const sec = ((Date.now() - BUSY_T0) / 1000).toFixed(1);
+    $('res').innerHTML = `<div class="busy">
+      <div class="spin"></div>
+      <div class="busyT">${esc(msg)}</div>
+      <div class="busyS">已用 ${sec} 秒 · 大表统计可能要几十秒，请稍等</div>
+    </div>`;
+  };
+  paint();
+  if (BUSY_TIMER) clearInterval(BUSY_TIMER);
+  BUSY_TIMER = setInterval(paint, 100);
+}
+
+function hideBusy() {
+  if (BUSY_TIMER) { clearInterval(BUSY_TIMER); BUSY_TIMER = null; }
 }
 function showErr(msg) {
   $('res').innerHTML = `<div class="rhead"><span class="badge bad">失败</span></div><div class="errbox">${esc(msg)}</div>`;
@@ -1905,6 +1931,7 @@ function toggleBlock(btn, ev) {
 
 // 渲染失败时给出可见提示，而不是留一块空白
 function safeRender(fn) {
+  hideBusy();
   try {
     fn();
   } catch (e) {

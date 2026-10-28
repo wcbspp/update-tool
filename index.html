@@ -1890,12 +1890,12 @@ let UPDATE_INFO = null;
 let UPDATE_BASE = '';
 let APP_VERSION = '';
 
-async function checkUpdate() {
+async function checkUpdate(fresh) {
   try {
-    const r = await api('/api/update/check');
+    const r = await api('/api/update/check' + (fresh ? '?fresh=1' : ''));
     if (!r) return;
     if (r.base) UPDATE_BASE = r.base;
-    if (!r.enabled || !r.hasUpdate) return;
+    if (!r.enabled || !r.hasUpdate) { UPDATE_INFO = null; return; }
     UPDATE_INFO = r;
     const dot = $('updDot');
     if (dot) dot.style.display = 'inline-block';
@@ -1906,6 +1906,8 @@ async function checkUpdate() {
 
 // 点版本号：显示版本信息、更新说明（如有）和仓库地址
 async function openUpdate() {
+  // 每次点开都重新取一次，避免显示缓存里的旧版本
+  try { await checkUpdate(true); } catch (e) {}
   if (!UPDATE_BASE) {
     try { const st = await api('/api/settings'); if (st && st.updateUrl) UPDATE_BASE = st.updateUrl; } catch (e) {}
   }

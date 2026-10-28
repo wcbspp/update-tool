@@ -479,3 +479,38 @@ func TestPreflightUpdateSubqueryNoWhere(t *testing.T) {
 		t.Fatalf("SET 里的子查询不能算 WHERE，实际: %v", titles(checks))
 	}
 }
+
+// SET 左值不写别名（但列只在目标表里）时，也要能估算影响行数
+func TestPreflightUpdateSetWithoutAlias(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+	for _, st := range []string{
+		"DROP TABLE IF EXISTS pf_ua", "DROP TABLE IF EXISTS pf_ua_src",
+		"CREATE TABLE pf_ua (id INT NOT NULL PRIMARY KEY, v INT, memo INT)",
+		"CREATE TABLE pf_ua_src (id INT NOT NULL PRIMARY KEY, v INT)",
+		"INSERT INTO pf_ua VALUES (1,1,NULL)",
+		"INSERT INTO pf_ua_src VALUES (1,9)",
+	} {
+		if _, err := db.Exec(st); err != nil {
+			t.Fatalf("准备失败(%s): %v", st, err)
+		}
+	}
+	defer func() {
+		db.Exec("DROP TABLE IF EXISTS pf_ua")
+		db.Exec("DROP TABLE IF EXISTS pf_ua_src")
+	}()
+
+	checks := runPf(t, ds, "UPDATE pf_ua a, pf_ua_src b SET memo=b.v WHERE a.id=b.id")
+	if !hasTitle(checks, "预计影响行数") {
+		t.Fatalf("SET 不写别名也应给出影响行数，实际: %v", titles(checks))
+	}
+	for _, c := range checks {
+		if s, _ := c["title"].(string); strings.Contains(s, "未计算") {
+			t.Fatalf("不应报未计算，实际: %v", titles(checks))
+		}
+	}
+}

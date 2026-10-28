@@ -2059,7 +2059,7 @@ func explainIndexes(db *sql.DB, q string) string {
 	return strings.Join(parts, " + ")
 }
 
-func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, string, bool) {
+func estimateUpdate(db *sql.DB, schema, st string, pfSec int, hintTable, hintAlias string) (int64, string, string, bool) {
 	const capN = 300000
 
 	m := reUpdate.FindStringSubmatch(st)
@@ -2084,6 +2084,9 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, st
 		}
 	}
 	if alias == "" {
+		alias = hintAlias // SET 左值没写别名时，用调用方已经解析出的目标表别名
+	}
+	if alias == "" {
 		return 0, "", "", false
 	}
 
@@ -2092,6 +2095,9 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, st
 		if t, a := parseTableRef(part); t != "" && strings.EqualFold(a, alias) {
 			table = mResolveTable(db, schema, t)
 		}
+	}
+	if table == "" {
+		table = hintTable
 	}
 	if table == "" {
 		return 0, "", "", false
@@ -2365,6 +2371,16 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	}
 	targetUse := map[string][]stmtTarget{}
 
+	type updTask struct {
+		i       int
+		stmt    string
+		target  string
+		alias   string
+		refs    []tblRef
+		updated map[string]bool
+	}
+	var updPending []updTask
+
 	type delTask struct {
 		i     int
 		stmt  string
@@ -2602,87 +2618,20 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 
 			targetTable := ""
+			targetAlias := ""
 			for _, ref := range refs {
 				if updated[strings.ToLower(ref.alias)] {
 					targetTable = ref.table
+					targetAlias = ref.alias
+					targetUse[ref.table] = append(targetUse[ref.table], stmtTarget{stmt: i, where: whereRaw(st)})
 					break
 				}
 			}
-			// 影响行数估算和各源表行数互不依赖：并发跑，再按原顺序输出
-			type srcCnt struct {
-				n      int64
-				capped bool
-				err    error
-				dur    time.Duration
-			}
-			var (
-				estN            int64
-				estNote, estIdx string
-				estOK           bool
-				estDur          time.Duration
-				cntMu           sync.Mutex
-				cnts            = map[string]srcCnt{}
-			)
-			tasks := []func(*sql.DB){func(c *sql.DB) {
-				t0 := time.Now()
-				estN, estNote, estIdx, estOK = estimateUpdate(c, schema, st, pfSec)
-				estDur = time.Since(t0)
-			}}
-			for _, r := range refs {
-				if updated[strings.ToLower(r.alias)] {
-					continue
-				}
-				rt := r.table
-				tasks = append(tasks, func(c *sql.DB) {
-					t0 := time.Now()
-					n, capped, cerr := tableCountBounded(c, rt, 300000, pfSec)
-					cntMu.Lock()
-					cnts[rt] = srcCnt{n: n, capped: capped, err: cerr, dur: time.Since(t0)}
-					cntMu.Unlock()
-				})
-			}
-			conns.parallel(db, tasks...)
-
-			if estOK {
-				tail := " · 全表扫（数据量小时优化器会这样选，不代表缺索引）"
-				if estIdx != "" {
-					tail = " · 索引 " + estIdx
-				} else if names := mIndexNames(db, schema, targetTable); len(names) > 0 {
-					tail = " · 全表扫（表上有 " + strings.Join(names, "、") + "，数据少时可能不走）"
-				}
-				switch estNote {
-				case "cap":
-					addD(i, "warn", "预计影响行数", fmt.Sprintf("≥ %d 行（数到 30 万就停了，实际可能更多）%s", estN, tail), estDur)
-				case "explain":
-					addD(i, "warn", "预计影响行数", fmt.Sprintf("约 %d 行（按执行计划估算）%s", estN, tail), estDur)
-				default:
-					addD(i, "ok", "预计影响行数", fmt.Sprintf("预计更新 %d 行（精确计数，最多数 30 万）%s", estN, tail), estDur)
-				}
-			} else {
-				add(i, "warn", "预计影响行数未计算", "查询超时或语句太复杂（大表上常见），不影响执行")
-			}
-			for _, r := range refs {
-				if updated[strings.ToLower(r.alias)] {
-					add(i, "ok", "被更新表", fmt.Sprintf("%s（别名 %s）", r.table, r.alias))
-					targetUse[r.table] = append(targetUse[r.table], stmtTarget{stmt: i, where: whereRaw(st)})
-					continue
-				}
-				cr := cnts[r.table]
-				if cr.err != nil {
-					addD(i, "warn", "行数统计失败", fmt.Sprintf("%s（别名 %s）的行数没数出来（超时或权限）：%s", r.table, r.alias, withHint(cr.err.Error())), cr.dur)
-				} else if cr.n == 0 {
-					addD(i, "warn", "源表为空", fmt.Sprintf("%s（别名 %s）没有数据，这条 UPDATE 不会命中任何行", r.table, r.alias), cr.dur)
-				} else {
-					label := fmt.Sprintf("%s（别名 %s）共 %d 行", r.table, r.alias, cr.n)
-					if cr.capped {
-						label = fmt.Sprintf("%s（别名 %s）共 ≥%d 行", r.table, r.alias, cr.n)
-					}
-					addD(i, "ok", "数据来源表", label, cr.dur)
-				}
-			}
-			if len(updated) == 0 {
-				add(i, "warn", "无法判断被更新表", "SET 左值既没别名也无法按列名定位，已跳过源表为空检查")
-			}
+			// 行数估算与各源表行数互不依赖，收集起来和整段脚本的其它语句一起并发跑
+			updPending = append(updPending, updTask{
+				i: i, stmt: st, target: targetTable, alias: targetAlias,
+				refs: refs, updated: updated,
+			})
 
 		case stmtKind(st) == "delete":
 			lim := deleteLimit(st)
@@ -2751,6 +2700,97 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 			if countTable != "" {
 				delPending = append(delPending, delTask{i: i, stmt: st, table: countTable, where: where, lim: lim})
+			}
+		}
+	}
+
+	// UPDATE 的估算与源表行数统一并发跑：脚本里多条 UPDATE 不再一条接一条等
+	if len(updPending) > 0 {
+		type estRes struct {
+			n    int64
+			note string
+			idx  string
+			ok   bool
+			dur  time.Duration
+		}
+		type cntRes struct {
+			n      int64
+			capped bool
+			err    error
+			dur    time.Duration
+		}
+		ests := make([]estRes, len(updPending))
+		cnts := make([]map[string]cntRes, len(updPending))
+		var mu sync.Mutex
+		var tasks []func(*sql.DB)
+		for k := range updPending {
+			k := k
+			p := updPending[k]
+			tasks = append(tasks, func(c *sql.DB) {
+				t0 := time.Now()
+				n, note, idx, ok := estimateUpdate(c, schema, p.stmt, pfSec, p.target, p.alias)
+				mu.Lock()
+				ests[k] = estRes{n: n, note: note, idx: idx, ok: ok, dur: time.Since(t0)}
+				mu.Unlock()
+			})
+			m := map[string]cntRes{}
+			cnts[k] = m
+			for _, r := range p.refs {
+				if p.updated[strings.ToLower(r.alias)] {
+					continue
+				}
+				rt := r.table
+				tasks = append(tasks, func(c *sql.DB) {
+					t0 := time.Now()
+					n, capped, cerr := tableCountBounded(c, rt, 300000, pfSec)
+					mu.Lock()
+					m[rt] = cntRes{n: n, capped: capped, err: cerr, dur: time.Since(t0)}
+					mu.Unlock()
+				})
+			}
+		}
+		conns.parallel(db, tasks...)
+
+		for k, p := range updPending {
+			er := ests[k]
+			if er.ok {
+				tail := " · 全表扫（数据量小时优化器会这样选，不代表缺索引）"
+				if er.idx != "" {
+					tail = " · 索引 " + er.idx
+				} else if names := mIndexNames(db, schema, p.target); len(names) > 0 {
+					tail = " · 全表扫（表上有 " + strings.Join(names, "、") + "，数据少时可能不走）"
+				}
+				switch er.note {
+				case "cap":
+					addD(p.i, "warn", "预计影响行数", fmt.Sprintf("≥ %d 行（数到 30 万就停了，实际可能更多）%s", er.n, tail), er.dur)
+				case "explain":
+					addD(p.i, "warn", "预计影响行数", fmt.Sprintf("约 %d 行（按执行计划估算）%s", er.n, tail), er.dur)
+				default:
+					addD(p.i, "ok", "预计影响行数", fmt.Sprintf("预计更新 %d 行（精确计数，最多数 30 万）%s", er.n, tail), er.dur)
+				}
+			} else {
+				add(p.i, "warn", "预计影响行数未计算", "查询超时或语句太复杂（大表上常见），不影响执行")
+			}
+			for _, r := range p.refs {
+				if p.updated[strings.ToLower(r.alias)] {
+					add(p.i, "ok", "被更新表", fmt.Sprintf("%s（别名 %s）", r.table, r.alias))
+					continue
+				}
+				cr := cnts[k][r.table]
+				if cr.err != nil {
+					addD(p.i, "warn", "行数统计失败", fmt.Sprintf("%s（别名 %s）的行数没数出来（超时或权限）：%s", r.table, r.alias, withHint(cr.err.Error())), cr.dur)
+				} else if cr.n == 0 {
+					addD(p.i, "warn", "源表为空", fmt.Sprintf("%s（别名 %s）没有数据，这条 UPDATE 不会命中任何行", r.table, r.alias), cr.dur)
+				} else {
+					label := fmt.Sprintf("%s（别名 %s）共 %d 行", r.table, r.alias, cr.n)
+					if cr.capped {
+						label = fmt.Sprintf("%s（别名 %s）共 ≥%d 行", r.table, r.alias, cr.n)
+					}
+					addD(p.i, "ok", "数据来源表", label, cr.dur)
+				}
+			}
+			if len(p.updated) == 0 {
+				add(p.i, "warn", "无法判断被更新表", "SET 左值既没别名也无法按列名定位，已跳过源表为空检查")
 			}
 		}
 	}

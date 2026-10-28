@@ -363,3 +363,78 @@ func TestPreflightVersionWithoutPrefixes(t *testing.T) {
 		t.Fatalf("应列出 2 个实际值，实际: %v", v["ok"])
 	}
 }
+
+// 估算时按表大小重排连接顺序：小表在前 + STRAIGHT_JOIN，且结果不变
+func TestReorderForCount(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+
+	setup := []string{
+		"DROP TABLE IF EXISTS r_ord_big",
+		"DROP TABLE IF EXISTS r_ord_small",
+		"CREATE TABLE r_ord_big (id INT NOT NULL PRIMARY KEY, v INT)",
+		"CREATE TABLE r_ord_small (id INT NOT NULL PRIMARY KEY, v INT)",
+	}
+	for _, st := range setup {
+		if _, err := db.Exec(st); err != nil {
+			t.Fatalf("准备失败(%s): %v", st, err)
+		}
+	}
+	// 大表 8192 行、小表 50 行（递归 CTE 有 1000 次上限，用倍增造数）
+	for _, tb := range []string{"r_ord_big", "r_ord_small"} {
+		if _, err := db.Exec("INSERT INTO " + tb + " (id, v) VALUES (1,1)"); err != nil {
+			t.Fatalf("造数失败: %v", err)
+		}
+		for i := 0; i < 13; i++ {
+			if _, err := db.Exec("INSERT INTO " + tb + " (id, v) SELECT id + (SELECT MAX(id) FROM (SELECT id FROM " + tb + ") x), 1 FROM " + tb); err != nil {
+				t.Fatalf("造数失败: %v", err)
+			}
+		}
+	}
+	if _, err := db.Exec("DELETE FROM r_ord_big WHERE id > 8192"); err != nil {
+		t.Fatalf("修剪失败: %v", err)
+	}
+	if _, err := db.Exec("DELETE FROM r_ord_small WHERE id > 50"); err != nil {
+		t.Fatalf("修剪失败: %v", err)
+	}
+	for _, tb := range []string{"r_ord_big", "r_ord_small"} {
+		if _, err := db.Exec("UPDATE " + tb + " SET v = id % 7"); err != nil {
+			t.Fatalf("造数失败: %v", err)
+		}
+	}
+	defer func() {
+		db.Exec("DROP TABLE IF EXISTS r_ord_big")
+		db.Exec("DROP TABLE IF EXISTS r_ord_small")
+	}()
+	if _, err := db.Exec("ANALYZE TABLE r_ord_big, r_ord_small"); err != nil {
+		t.Fatalf("统计信息失败: %v", err)
+	}
+
+	out, ok := reorderForCount(db, ds.Database, "r_ord_big a, r_ord_small b")
+	if !ok {
+		t.Fatalf("应能重排，实际放弃")
+	}
+	if !strings.Contains(out, "STRAIGHT_JOIN") {
+		t.Fatalf("应加 STRAIGHT_JOIN，实际: %s", out)
+	}
+	if !strings.HasPrefix(out, "r_ord_small") {
+		t.Fatalf("小表应在前，实际: %s", out)
+	}
+
+	// 重排不改变结果
+	var n1, n2 int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM r_ord_big a, r_ord_small b WHERE a.v = b.v").Scan(&n1); err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	q2 := "SELECT COUNT(*) FROM " + out + " WHERE a.v = b.v"
+	if err := db.QueryRow(q2).Scan(&n2); err != nil {
+		t.Fatalf("重排后查询失败: %v", err)
+	}
+	if n1 != n2 {
+		t.Fatalf("重排改变了结果：%d vs %d", n1, n2)
+	}
+}

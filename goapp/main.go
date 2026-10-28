@@ -1025,6 +1025,51 @@ func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
 	return 0, false
 }
 
+var reJoinWord = regexp.MustCompile(`(?is)\b(join|straight_join)\b`)
+
+// approxRows：表行数的近似值（information_schema，不扫表）
+func approxRows(db *sql.DB, schema, table string) (int64, bool) {
+	var n int64
+	err := infQueryRow(db, `SELECT TABLE_ROWS FROM information_schema.TABLES
+		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) LIMIT 1`, schema, table).Scan(&n)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// reorderForCount：把逗号连接改写成「小表在前 + STRAIGHT_JOIN」。
+// 不这样写，优化器可能拿百万行的大表当驱动表，再逐行去扫批次表，
+// 一条 15 万行的 UPDATE 估算就要跑几分钟（生产上就是这样翻车的）。
+func reorderForCount(db *sql.DB, schema, tablesPart string) (string, bool) {
+	if reJoinWord.MatchString(tablesPart) {
+		return tablesPart, false // 已经写了 JOIN 语法，不擅自改顺序
+	}
+	parts := splitTopLevel(tablesPart)
+	if len(parts) < 2 {
+		return tablesPart, false
+	}
+	rows := make([]int64, len(parts))
+	for i, p := range parts {
+		t, _ := parseTableRef(strings.TrimSpace(p))
+		n, ok := approxRows(db, schema, mResolveTable(db, schema, t))
+		if !ok {
+			return tablesPart, false // 拿不到行数就不猜
+		}
+		rows[i] = n
+	}
+	order := make([]int, len(parts))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return rows[order[a]] < rows[order[b]] })
+	out := make([]string, 0, len(parts))
+	for _, i := range order {
+		out = append(out, strings.TrimSpace(parts[i]))
+	}
+	return strings.Join(out, " STRAIGHT_JOIN "), true
+}
+
 // countWhereBounded：按条件有界计数，最多数到 cap 行就停
 func countWhereBounded(db *sql.DB, from, where string, cap int64, pfSec int) (int64, bool, error) {
 	q := "SELECT COUNT(*) FROM (SELECT 1 FROM " + from
@@ -2029,8 +2074,13 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, st
 
 	where := whereRaw(st)
 
-	// 先做有界精确计数：最多数到 10 万行就停，不会因为表大而拖死
-	q := "SELECT COUNT(*) FROM (SELECT 1 FROM " + tablesPart
+	// 先做有界精确计数：最多数到 30 万行就停，不会因为表大而拖死。
+	// 连接顺序按表大小排好并加 STRAIGHT_JOIN，避免大表驱动导致全表扫描。
+	from := tablesPart
+	if v, ok := reorderForCount(db, schema, tablesPart); ok {
+		from = v
+	}
+	q := "SELECT COUNT(*) FROM (SELECT 1 FROM " + from
 	if where != "" {
 		q += " WHERE " + where
 	}

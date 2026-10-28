@@ -967,9 +967,21 @@ func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
 	return 0, false
 }
 
-func tableCount(db *sql.DB, t string) int64 {
+// tableCountBounded：最多数到 cap 行就停，避免大表全表扫描
+func tableCountBounded(db *sql.DB, t string, cap int64) (int64, bool) {
 	var n int64
-	_ = db.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(t)).Scan(&n)
+	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s LIMIT %d) x", quoteIdent(t), cap+1)
+	if err := db.QueryRow(q).Scan(&n); err != nil {
+		return 0, false
+	}
+	if n > cap {
+		return cap, true
+	}
+	return n, false
+}
+
+func tableCount(db *sql.DB, t string) int64 {
+	n, _ := tableCountBounded(db, t, 300000)
 	return n
 }
 
@@ -1107,14 +1119,23 @@ func keyCols(db *sql.DB, schema, t string) ([]string, string) {
 			return it.cols, it.name
 		}
 	}
+	// 一次性取该表所有列的可空性，避免逐列查询
+	nullableCols := map[string]bool{}
+	if rows, err := infQuery(db, `SELECT UPPER(COLUMN_NAME), UPPER(IS_NULLABLE) FROM information_schema.COLUMNS
+		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)`, schema, t); err == nil {
+		for rows.Next() {
+			var name, nul string
+			if rows.Scan(&name, &nul) == nil {
+				nullableCols[name] = strings.EqualFold(nul, "YES")
+			}
+		}
+		rows.Close()
+	}
+
 	for _, it := range list {
 		ok := true
 		for _, c := range it.cols {
-			var nullable string
-			_ = db.QueryRow(`SELECT IS_NULLABLE FROM information_schema.COLUMNS
-				WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND UPPER(COLUMN_NAME)=UPPER(?)`,
-				schema, t, c).Scan(&nullable)
-			if !strings.EqualFold(nullable, "NO") {
+			if nullableCols[strings.ToUpper(c)] {
 				ok = false
 				break
 			}
@@ -1831,11 +1852,15 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 			}
 			tCnt := time.Now()
-			n := tableCount(db, src)
+			n, capped := tableCountBounded(db, src, 300000)
 			if n == 0 {
 				addT(i, "warn", "源表为空", fmt.Sprintf("%s 没有数据，这条 INSERT 不会插入任何行", src), tCnt)
 			} else {
-				addT(i, "ok", "源表非空", fmt.Sprintf("%s 共 %d 行", src, n), tCnt)
+				label := fmt.Sprintf("%s 共 %d 行", src, n)
+				if capped {
+					label = fmt.Sprintf("%s 共 ≥%d 行", src, n)
+				}
+				addT(i, "ok", "源表非空", label, tCnt)
 			}
 			pk, idxName := keyCols(db, schema, target)
 			if len(pk) == 0 {
@@ -2009,11 +2034,15 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					targetUse[r.table] = append(targetUse[r.table], stmtTarget{stmt: i, where: whereRaw(st)})
 					continue
 				}
-				n := tableCount(db, r.table)
+				n, capped := tableCountBounded(db, r.table, 300000)
 				if n == 0 {
 					add(i, "warn", "源表为空", fmt.Sprintf("%s（别名 %s）没有数据，这条 UPDATE 不会命中任何行", r.table, r.alias))
 				} else {
-					add(i, "ok", "数据来源表", fmt.Sprintf("%s（别名 %s）共 %d 行", r.table, r.alias, n))
+					label := fmt.Sprintf("%s（别名 %s）共 %d 行", r.table, r.alias, n)
+					if capped {
+						label = fmt.Sprintf("%s（别名 %s）共 ≥%d 行", r.table, r.alias, n)
+					}
+					add(i, "ok", "数据来源表", label)
 				}
 			}
 			if len(updated) == 0 {

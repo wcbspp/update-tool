@@ -15,7 +15,7 @@
   .wrap{max-width:860px;margin:0 auto;padding:44px 28px 80px}
   header{border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}
   h1{font-size:20px;margin:0 0 6px;font-weight:700}
-  .sub{font-size:12px;color:#5f6a7d;font-family:ui-monospace,Menlo,monospace}
+  .sub{font-size:12.5px;color:#a9b9cf;font-family:ui-monospace,Menlo,monospace}
   .lead{font-size:14px;color:#c2cddd;background:#11161f;border-left:3px solid var(--acc);
     padding:12px 16px;border-radius:0 6px 6px 0;margin:0 0 26px}
   h2{font-size:14px;margin:30px 0 10px;color:#e6ecf6;font-weight:600}
@@ -36,14 +36,14 @@
   .warn{background:#2a1114;border:1px solid #50222a;border-radius:8px;padding:14px 16px;margin:26px 0}
   .warn h3{margin:0 0 6px;font-size:13.5px;color:var(--warn)}
   .warn p{margin:0;color:#e0b48a}
-  .tip{font-size:12.5px;color:#67728a;margin-top:34px;border-top:1px solid var(--line);padding-top:14px}
+  .tip{font-size:12.5px;color:#8d9bb0;margin-top:34px;border-top:1px solid var(--line);padding-top:14px}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>使用说明</h1>
-    <div class="sub">update-tool v1.0.1 · 示例地区（统筹区 2107）省集中版本</div>
+    <div class="sub"><span id="gver">update-tool</span> · 示例地区（统筹区 2107）省集中版本</div>
   </header>
 
   <p class="lead">把原来手工执行的一串 SQL 收进一个可复核的操作台，<b>防止手抖</b>——降低连错库、漏改语句、重复执行、条件写错的风险。</p>
@@ -128,5 +128,11 @@
 
   <div class="tip">update-tool · 创意 by 吴美丽</div>
 </div>
+<script>
+  fetch('/api/health').then(r => r.json()).then(h => {
+    const el = document.getElementById('gver');
+    if (el && h && h.version) el.textContent = 'update-tool v' + h.version;
+  }).catch(() => {});
+</script>
 </body>
 </html>

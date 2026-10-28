@@ -535,7 +535,9 @@ func splitStatements(text string) []string {
 
 func isDDL(s string) bool {
 	t := strings.ToUpper(strings.TrimSpace(s))
-	for _, p := range []string{"CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE"} {
+	for _, p := range []string{"CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE",
+		// 这些也会隐式提交（或自行控制事务），同样会让“失败整体回滚”失效
+		"LOCK TABLES", "UNLOCK TABLES", "ANALYZE", "OPTIMIZE", "REPAIR", "CALL", "FLUSH", "INSTALL", "UNINSTALL"} {
 		if strings.HasPrefix(t, p) {
 			return true
 		}
@@ -679,14 +681,18 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 	// 执行阶段取消 DQL 的统计上限，DML 用 context 单独限时
 	_, _ = db.Exec("SET SESSION max_execution_time = 0")
 
-	ctx := context.Background()
-	if sec := dsDMLSec(ds); sec > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(sec)*time.Second)
-		defer cancel()
+	// 超时按「每条语句」算：整段共用一个上下文时，一条慢语句会把
+	// 前面已经成功的语句一起拖到超时，用户看到的是整批回滚。
+	baseCtx := context.Background()
+	dmlSec := dsDMLSec(ds)
+	perStmt := func() (context.Context, context.CancelFunc) {
+		if dmlSec > 0 {
+			return context.WithTimeout(baseCtx, time.Duration(dmlSec)*time.Second)
+		}
+		return context.WithCancel(baseCtx)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(baseCtx, nil)
 	if err != nil {
 		return res, -1, err.Error(), time.Since(start).Milliseconds()
 	}
@@ -698,13 +704,16 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 
 	for i, st := range stmts {
 		t0 := time.Now()
+		sctx, cancel := perStmt()
 		if isQuery(st) {
-			rows, err := tx.QueryContext(ctx, st)
+			rows, err := tx.QueryContext(sctx, st)
 			if err != nil {
+				cancel()
 				return fail(i, err)
 			}
 			cols, data, err := scanRows(rows)
 			rows.Close()
+			cancel()
 			if err != nil {
 				return fail(i, err)
 			}
@@ -713,10 +722,12 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 			}
 			res[strconv.Itoa(i)] = stmtResult{Columns: cols, Rows: data, MS: time.Since(t0).Milliseconds()}
 		} else {
-			r, err := tx.ExecContext(ctx, st)
+			r, err := tx.ExecContext(sctx, st)
 			if err != nil {
+				cancel()
 				return fail(i, err)
 			}
+			cancel()
 			n, _ := r.RowsAffected()
 			res[strconv.Itoa(i)] = stmtResult{Affected: n, MS: time.Since(t0).Milliseconds()}
 		}
@@ -3638,7 +3649,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(ddlIdx) > 0 {
 			writeJSON(w, 400, map[string]any{"ok": false,
-				"error": "第 " + idxList(ddlIdx) + " 条是 DDL（CREATE/ALTER/DROP/TRUNCATE 等）。MySQL 的 DDL 会隐式提交，一旦中断无法整体回滚，已拒绝执行。请把 DDL 单独拿出来在客户端执行"})
+				"error": "第 " + idxList(ddlIdx) + " 条是 DDL 或会隐式提交的语句（CREATE/ALTER/DROP/TRUNCATE/LOCK TABLES/ANALYZE/CALL 等）。它们会让“失败整体回滚”失效，已拒绝执行。请把这类语句单独拿出来在客户端执行"})
 			return
 		}
 

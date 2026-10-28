@@ -438,3 +438,28 @@ func TestReorderForCount(t *testing.T) {
 		t.Fatalf("重排改变了结果：%d vs %d", n1, n2)
 	}
 }
+
+// 没配版本字段时不应产生版本核对块（否则界面显示一堆“无  字段”）
+func TestPreflightNoVersionColumnSkipsCheck(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("DROP TABLE IF EXISTS pf_nv_update_1"); err != nil {
+		t.Fatalf("准备失败: %v", err)
+	}
+	if _, err := db.Exec("CREATE TABLE pf_nv_update_1 (CODE VARCHAR(8))"); err != nil {
+		t.Fatalf("准备失败: %v", err)
+	}
+	defer db.Exec("DROP TABLE IF EXISTS pf_nv_update_1")
+
+	_, versions, err := preflight(ds, splitStatements("UPDATE pf_nv_update_1 SET CODE='A' WHERE CODE='A'"), "", nil)
+	if err != nil {
+		t.Fatalf("预检失败: %v", err)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("没配版本字段不应有版本块，实际 %v", versions)
+	}
+}

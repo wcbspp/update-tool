@@ -1053,8 +1053,8 @@ func reorderForCount(db *sql.DB, schema, tablesPart string) (string, bool) {
 	for i, p := range parts {
 		t, _ := parseTableRef(strings.TrimSpace(p))
 		n, ok := approxRows(db, schema, mResolveTable(db, schema, t))
-		if !ok {
-			return tablesPart, false // 拿不到行数就不猜
+		if !ok || n <= 0 {
+			return tablesPart, false // 行数未知或为 0 就不猜，避免把统计过期的大表排到最前
 		}
 		rows[i] = n
 	}
@@ -2262,9 +2262,12 @@ func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 		LEFT JOIN information_schema.PROCESSLIST p ON p.id = t.trx_mysql_thread_id
 		WHERE t.trx_rows_modified > 0 AND (p.db = ? OR p.db IS NULL OR ? = '')`, schema, schema)
 	if err != nil {
-		// 关联失败（中间件/权限）时至少报个数，别静默当没有
+		// 关联失败（中间件/权限）时至少报个数，别静默当没有。
+		// 用新 ctx：上面那条可能已经因超时把 ctx 取消了。
+		fctx, fcancel := pfCtx(pfSec)
+		defer fcancel()
 		var n int
-		if e := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_rows_modified > 0`).Scan(&n); e == nil && n > 0 {
+		if e := db.QueryRowContext(fctx, `SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_rows_modified > 0`).Scan(&n); e == nil && n > 0 {
 			out = append(out, map[string]any{
 				"stmt": -1, "level": "warn", "title": "有未提交事务",
 				"detail": fmt.Sprintf("库里有 %d 个事务改了行还没提交，但读不到它属于哪个库；工具看到的可能是提交前的数据", n),
@@ -2774,7 +2777,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			fmt.Sprintf("%s 出现在 %d 条语句里：\n%s\n结论：%s", t, len(uses), strings.Join(parts, "\n"), verdict))
 	}
 
-	// 版本核对与前面的语句检查互不依赖，用另一条连接并发跑
+	// 版本核对与前面的语句检查互不依赖，用另一条连接并发跑；
+	// 没配版本字段时不做这项，免得界面上一堆“无  字段”
+	if strings.TrimSpace(verColName) == "" {
+		batchTables = nil
+	}
 	var versions []map[string]any
 	var vwg sync.WaitGroup
 	vwg.Add(1)

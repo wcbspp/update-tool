@@ -2203,7 +2203,8 @@ function toggleLog(i) {
 }
 async function clearLogs() {
   if (!confirm('清空所有执行日志？')) return;
-  await del('/api/logs');
+  // 后端要求显式确认参数，少了会 400
+  await del('/api/logs?confirm=1');
   LOGS = []; renderLogs(); toast('已清空', 'ok');
 }
 

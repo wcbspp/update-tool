@@ -40,24 +40,56 @@ func TestMetadataFallbackWhenInformationSchemaBlocked(t *testing.T) {
 		t.Fatalf("索引兜底失败：cols=%v name=%q", cols, name)
 	}
 
-	// 字段存在性：应回退 SHOW COLUMNS
-	if !tableHasColumn(db, ds.Database, "meta_probe", "CRTER_ID") {
+	// 字段/可空：都应回退 SHOW COLUMNS，且只查一次就能拿到整表
+	colsMap := fetchCols(db, ds.Database, "meta_probe")
+	if _, ok := colsMap["CRTER_ID"]; !ok {
 		t.Fatal("字段存在性兜底失败：CRTER_ID 被判为不存在")
 	}
-	if tableHasColumn(db, ds.Database, "meta_probe", "NO_SUCH_COL") {
+	if _, ok := colsMap["NO_SUCH_COL"]; ok {
 		t.Fatal("字段存在性误判：不存在的列被判为存在")
 	}
-
-	// 列数：应回退 SHOW COLUMNS
-	if n := tableColumnCount(db, ds.Database, "meta_probe"); n != 4 {
-		t.Fatalf("列数兜底失败：得到 %d，期望 4", n)
+	if len(colsMap) != 4 {
+		t.Fatalf("列数兜底失败：得到 %d，期望 4", len(colsMap))
 	}
-
-	// 可空判断：应回退 SHOW COLUMNS
-	if nullable, ok := colNullable(db, ds.Database, "meta_probe", "memo"); !ok || !nullable {
-		t.Fatalf("可空兜底失败：nullable=%v ok=%v", nullable, ok)
+	if !colsMap["MEMO"] {
+		t.Fatalf("可空兜底失败：memo 应可空，得到 %v", colsMap["MEMO"])
 	}
-	if nullable, ok := colNullable(db, ds.Database, "meta_probe", "code"); !ok || nullable {
-		t.Fatalf("可空兜底误判：code 不可空，得到 nullable=%v ok=%v", nullable, ok)
+	if colsMap["CODE"] {
+		t.Fatalf("可空兜底误判：code 不可空，得到 %v", colsMap["CODE"])
+	}
+}
+
+// 元数据缓存：同一张表第二次调用不应再发查询
+func TestMetaCacheHits(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+	defer metaDrop(db)
+
+	if _, err := db.Exec("DROP TABLE IF EXISTS meta_cache_probe"); err != nil {
+		t.Fatalf("准备表失败: %v", err)
+	}
+	if _, err := db.Exec("CREATE TABLE meta_cache_probe (id INT NOT NULL PRIMARY KEY, memo VARCHAR(8) NULL)"); err != nil {
+		t.Fatalf("准备表失败: %v", err)
+	}
+	defer func() { _, _ = db.Exec("DROP TABLE IF EXISTS meta_cache_probe") }()
+
+	oldQ := infQuery
+	calls := 0
+	infQuery = func(db *sql.DB, q string, args ...any) (*sql.Rows, error) {
+		calls++
+		return oldQ(db, q, args...)
+	}
+	defer func() { infQuery = oldQ }()
+
+	for i := 0; i < 3; i++ {
+		mHasColumn(db, ds.Database, "meta_cache_probe", "memo")
+		mCols(db, ds.Database, "meta_cache_probe")
+	}
+	if calls != 1 {
+		t.Fatalf("同一张表应只查一次元数据，实际发了 %d 次", calls)
 	}
 }

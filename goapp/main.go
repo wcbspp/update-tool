@@ -827,11 +827,19 @@ func cutAtKeyword(s, kw string) string {
 				depth--
 			}
 		}
-		if depth == 0 && strings.HasPrefix(low[i:], " "+kw) {
-			return s[:i]
+		// 关键字前可以是空格、换行、Tab（SQL 里换行很常见），后面必须是边界
+		if depth == 0 && i > 0 && isSpaceByte(low[i-1]) && strings.HasPrefix(low[i:], kw) {
+			rest := low[i+len(kw):]
+			if rest == "" || isSpaceByte(rest[0]) || rest[0] == '(' {
+				return s[:i]
+			}
 		}
 	}
 	return s
+}
+
+func isSpaceByte(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 func indexTopLevel(s string, target byte) int {
@@ -878,20 +886,6 @@ func parseTableRef(p string) (string, string) {
 }
 
 type tblRef struct{ table, alias string }
-
-// 反查某列属于哪些参与表：SET 没写别名时用它消歧，而不是猜
-func tablesHavingCol(db *sql.DB, schema string, refs []tblRef, col string) []tblRef {
-	out := make([]tblRef, 0)
-	for _, r := range refs {
-		var n int
-		_ = db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
-			WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME=?`, schema, r.table, col).Scan(&n)
-		if n > 0 {
-			out = append(out, r)
-		}
-	}
-	return out
-}
 
 // 表行数的近似值，来自 information_schema，不扫表
 
@@ -967,59 +961,19 @@ func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
 	return 0, false
 }
 
-// tableCountBounded：最多数到 cap 行就停，避免大表全表扫描
-func tableCountBounded(db *sql.DB, t string, cap int64) (int64, bool) {
+// tableCountBounded：最多数到 cap 行就停，避免大表全表扫描。
+// 第三个返回值区分「真的是 0 行」和「没数出来（超时/权限）」——
+// 两者绝不能混为一谈：把超时当成空表会让用户去重灌数据。
+func tableCountBounded(db *sql.DB, t string, cap int64) (int64, bool, error) {
 	var n int64
 	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s LIMIT %d) x", quoteIdent(t), cap+1)
 	if err := db.QueryRow(q).Scan(&n); err != nil {
-		return 0, false
+		return 0, false, err
 	}
 	if n > cap {
-		return cap, true
+		return cap, true, nil
 	}
-	return n, false
-}
-
-func tableCount(db *sql.DB, t string) int64 {
-	n, _ := tableCountBounded(db, t, 300000)
-	return n
-}
-
-// 某列是否存在于表里；information_schema 不可用时退回 SHOW COLUMNS
-func tableHasColumn(db *sql.DB, schema, table, col string) bool {
-	var n int
-	if err := infQueryRow(db, `SELECT COUNT(*) FROM information_schema.COLUMNS
-		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND UPPER(COLUMN_NAME)=UPPER(?)`,
-		schema, table, col).Scan(&n); err == nil && n > 0 {
-		return true
-	}
-	rows, err := db.Query("SHOW COLUMNS FROM " + qualTable(schema, table) +
-		" LIKE '" + strings.ReplaceAll(col, "'", "''") + "'")
-	if err != nil {
-		return false
-	}
-	defer rows.Close()
-	return rows.Next()
-}
-
-// 表的列数；information_schema 不可用时退回 SHOW COLUMNS 计数
-func tableColumnCount(db *sql.DB, schema, table string) int {
-	var n int
-	if err := infQueryRow(db, `SELECT COUNT(*) FROM information_schema.COLUMNS
-		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)`,
-		schema, table).Scan(&n); err == nil && n > 0 {
-		return n
-	}
-	rows, err := db.Query("SHOW COLUMNS FROM " + qualTable(schema, table))
-	if err != nil {
-		return 0
-	}
-	defer rows.Close()
-	c := 0
-	for rows.Next() {
-		c++
-	}
-	return c
+	return n, false, nil
 }
 
 // 表名限定：schema.table
@@ -1028,53 +982,6 @@ func qualTable(schema, table string) string {
 		return quoteIdent(table)
 	}
 	return quoteIdent(schema) + "." + quoteIdent(table)
-}
-
-// 列是否允许 NULL
-func colNullable(db *sql.DB, schema, table, col string) (bool, bool) {
-	var v string
-	err := infQueryRow(db, `SELECT IS_NULLABLE FROM information_schema.COLUMNS
-		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND UPPER(COLUMN_NAME)=UPPER(?)`,
-		schema, table, col).Scan(&v)
-	if err == nil {
-		return strings.EqualFold(v, "YES"), true
-	}
-	// 兜底：SHOW COLUMNS 的 Null 列
-	rows, e := db.Query("SHOW COLUMNS FROM " + qualTable(schema, table) +
-		" LIKE '" + strings.ReplaceAll(col, "'", "''") + "'")
-	if e != nil {
-		return false, false
-	}
-	defer rows.Close()
-	cols, e := rows.Columns()
-	if e != nil || !rows.Next() {
-		return false, false
-	}
-	vals := make([]any, len(cols))
-	ptrs := make([]any, len(cols))
-	for i := range vals {
-		ptrs[i] = &vals[i]
-	}
-	if rows.Scan(ptrs...) != nil {
-		return false, false
-	}
-	for i, c := range cols {
-		if strings.EqualFold(c, "Null") {
-			var b []byte
-			switch t := vals[i].(type) {
-			case []byte:
-				b = t
-			case string:
-				b = []byte(t)
-			}
-			return strings.EqualFold(string(b), "YES"), true
-		}
-	}
-	return false, false
-}
-
-func columnCount(db *sql.DB, schema, t string) int {
-	return tableColumnCount(db, schema, t)
 }
 
 // 唯一键：优先主键；没有主键就用“所有列都 NOT NULL”的唯一索引（唯一索引允许多个 NULL，不能用来判重）
@@ -1207,9 +1114,11 @@ func mCols(db *sql.DB, schema, table string) map[string]bool {
 	}
 	mc.mu.Unlock()
 	m := fetchCols(db, schema, table)
-	mc.mu.Lock()
-	e.cols, e.gotC = m, true
-	mc.mu.Unlock()
+	if len(m) > 0 { // 读失败（空）不缓存，下次重试，避免一次抖动把整次预检判成“没有列”
+		mc.mu.Lock()
+		e.cols, e.gotC = m, true
+		mc.mu.Unlock()
+	}
 	return m
 }
 
@@ -1236,9 +1145,11 @@ func mIndexes(db *sql.DB, schema, table string) (map[string][]string, []string) 
 	}
 	mc.mu.Unlock()
 	idx, ord := indexesOf(db, schema, table)
-	mc.mu.Lock()
-	e.idx, e.ord, e.gotI = idx, ord, true
-	mc.mu.Unlock()
+	if len(idx) > 0 { // 同上：读失败不缓存
+		mc.mu.Lock()
+		e.idx, e.ord, e.gotI = idx, ord, true
+		mc.mu.Unlock()
+	}
 	return idx, ord
 }
 
@@ -1258,24 +1169,6 @@ func mIndexNames(db *sql.DB, schema, table string) []string {
 	return out
 }
 
-func mHasIndexFor(db *sql.DB, schema, t string, cols []string) (bool, string) {
-	if len(cols) == 0 {
-		return false, ""
-	}
-	idx, order := mIndexes(db, schema, t)
-	sample := ""
-	for _, name := range order {
-		list := idx[name]
-		if indexCoversJoin(list, cols) {
-			return true, name
-		}
-		if sample == "" && len(list) > 0 {
-			sample = name + "(" + strings.Join(list, ", ") + ")"
-		}
-	}
-	return false, sample
-}
-
 func mKeyCols(db *sql.DB, schema, t string) ([]string, string) {
 	mc := metaOf(db)
 	e := mc.entry(schema, t)
@@ -1287,9 +1180,11 @@ func mKeyCols(db *sql.DB, schema, t string) ([]string, string) {
 	}
 	mc.mu.Unlock()
 	cols, name := keyCols(db, schema, t)
-	mc.mu.Lock()
-	e.keys, e.keyNm, e.gotK = cols, name, true
-	mc.mu.Unlock()
+	if len(cols) > 0 { // 同上：读失败不缓存
+		mc.mu.Lock()
+		e.keys, e.keyNm, e.gotK = cols, name, true
+		mc.mu.Unlock()
+	}
 	return cols, name
 }
 
@@ -1479,28 +1374,6 @@ func keyColsViaShowIndex(db *sql.DB, schema, t string) ([]string, string) {
 	return nil, ""
 }
 
-// 这几列上有没有可用的索引（索引的前缀列包含它们即可）
-// indexCoversJoin: 索引能否支撑按 joinCols 的等值连接。
-// MySQL 只能用最左前缀，所以要求索引的前 len(joinCols) 列正好是这些列（顺序不限）。
-func indexCoversJoin(indexCols, joinCols []string) bool {
-	if len(joinCols) == 0 || len(indexCols) < len(joinCols) {
-		return false
-	}
-	want := map[string]bool{}
-	for _, c := range joinCols {
-		want[strings.ToLower(c)] = true
-	}
-	seen := map[string]bool{}
-	for _, c := range indexCols[:len(joinCols)] {
-		lc := strings.ToLower(c)
-		if !want[lc] || seen[lc] {
-			return false
-		}
-		seen[lc] = true
-	}
-	return len(seen) == len(want)
-}
-
 // indexesOf: 取表上全部索引（含非唯一），保持出现顺序。优先 information_schema，失败退回 SHOW INDEX。
 func indexesOf(db *sql.DB, schema, t string) (map[string][]string, []string) {
 	out := map[string][]string{}
@@ -1589,42 +1462,6 @@ func indexesOf(db *sql.DB, schema, t string) (map[string][]string, []string) {
 	return out, order
 }
 
-// hasIndexFor: 是否存在以 joinCols 为最左前缀的索引；第二个返回值用于提示现有索引长什么样
-// 列出表上现有索引，形如 IDX_X(col1,col2)，最多 3 个
-func indexNamesOf(db *sql.DB, schema, table string) []string {
-	idx, order := indexesOf(db, schema, table)
-	out := make([]string, 0, 3)
-	for _, name := range order {
-		cols := idx[name]
-		if len(cols) == 0 {
-			continue
-		}
-		out = append(out, name+"("+strings.Join(cols, ",")+")")
-		if len(out) >= 3 {
-			break
-		}
-	}
-	return out
-}
-
-func hasIndexFor(db *sql.DB, schema, t string, cols []string) (bool, string) {
-	if len(cols) == 0 {
-		return false, ""
-	}
-	idx, order := indexesOf(db, schema, t)
-	sample := ""
-	for _, name := range order {
-		list := idx[name]
-		if indexCoversJoin(list, cols) {
-			return true, name
-		}
-		if sample == "" && len(list) > 0 {
-			sample = name + "(" + strings.Join(list, ", ") + ")"
-		}
-	}
-	return false, sample
-}
-
 // dupCount: 源表内按判重键统计“重复的组数”，最多数到 capCap 组就停
 func dupCountCapped(db *sql.DB, table string, cols []string, capCap int) (int64, bool, error) {
 	if len(cols) == 0 {
@@ -1645,18 +1482,107 @@ func dupCountCapped(db *sql.DB, table string, cols []string, capCap int) (int64,
 	return n, false, err
 }
 
-func dupCount(db *sql.DB, table string, cols []string) (int64, error) {
-	n, _, err := dupCountCapped(db, table, cols, 1000)
-	return n, err
+// 判重列映射：INSERT ... SELECT 里，目标判重列到底取自源表哪一列。
+// 只有「SELECT 列表全是普通列引用，且与列清单按位置对得上」才给结论；
+// 出现表达式（id+1）、函数、常量时实际插入值不是源表原值，不能据此判断冲突。
+func insertKeyMap(sel, colList string, pk []string) (map[string]string, bool) {
+	if len(pk) == 0 {
+		return map[string]string{}, false
+	}
+	body := strings.TrimSpace(sel)
+	if len(body) < 6 || !strings.EqualFold(body[:6], "select") {
+		return map[string]string{}, false
+	}
+	body = strings.TrimSpace(body[6:])
+	for {
+		low := strings.ToLower(body)
+		if strings.HasPrefix(low, "distinct ") {
+			body = strings.TrimSpace(body[len("distinct "):])
+			continue
+		}
+		if strings.HasPrefix(low, "all ") {
+			body = strings.TrimSpace(body[len("all "):])
+			continue
+		}
+		break
+	}
+	body = cutAtKeyword(body, "from")
+	items := splitTopLevel(body)
+	if len(items) == 0 {
+		return map[string]string{}, false
+	}
+
+	// INSERT INTO t SELECT * FROM b：没写列清单且整表投影，值按位置对应同名判重列
+	if strings.TrimSpace(colList) == "" && len(items) == 1 {
+		it := strings.TrimSpace(items[0])
+		if it == "*" || (strings.HasSuffix(it, ".*") && !strings.ContainsAny(it, " ()")) {
+			out := map[string]string{}
+			for _, c := range pk {
+				u := strings.ToUpper(c)
+				out[u] = u
+			}
+			return out, true
+		}
+	}
+
+	var cols []string
+	if strings.TrimSpace(colList) != "" {
+		for _, c := range splitTopLevel(colList) {
+			cols = append(cols, strings.ToUpper(trimIdent(strings.TrimSpace(c))))
+		}
+		if len(cols) != len(items) {
+			return map[string]string{}, false
+		}
+	}
+
+	out := map[string]string{}
+	for idx, it := range items {
+		col := plainColumnRef(it)
+		if col == "" {
+			return map[string]string{}, false
+		}
+		if cols != nil {
+			out[cols[idx]] = col
+		}
+	}
+	if cols == nil {
+		for _, c := range pk {
+			u := strings.ToUpper(c)
+			out[u] = u
+		}
+	}
+	for _, c := range pk {
+		if _, ok := out[strings.ToUpper(c)]; !ok {
+			return map[string]string{}, false
+		}
+	}
+	return out, true
 }
 
-func conflictCountCapped(db *sql.DB, target, src string, pk []string, capN int) (int64, bool, error) {
-	var conds []string
-	for _, c := range pk {
-		conds = append(conds, "t."+quoteIdent(c)+"=s."+quoteIdent(c))
+var rePlainCol = regexp.MustCompile("^[`\"]?[A-Za-z0-9_$]+[`\"]?(?:\\.[`\"]?[A-Za-z0-9_$]+[`\"]?)?$")
+var reAsAlias = regexp.MustCompile(`(?is)^([\s\S]*\S)\s+as\s+[\x60"]?[\w$]+[\x60"]?$`)
+
+// 普通列引用（可带表别名前缀、可带 AS 别名），返回不带限定符的列名；不是普通列就返回空
+func plainColumnRef(item string) string {
+	it := strings.TrimSpace(item)
+	if m := reAsAlias.FindStringSubmatch(it); m != nil {
+		it = strings.TrimSpace(m[1])
 	}
-	// 用小批次表驱动，避免优化器拿几千万行的目标表当驱动表去全表扫；
-	// 内层 LIMIT 让“冲突很多”的情况提前收手
+	if !rePlainCol.MatchString(it) {
+		return ""
+	}
+	if i := strings.LastIndex(it, "."); i >= 0 {
+		it = it[i+1:]
+	}
+	return strings.ToUpper(strings.Trim(it, "`\""))
+}
+
+// conflictCountPairs 按「目标列 ↔ 源列」的对应关系数冲突行，最多数到 capN 行
+func conflictCountPairs(db *sql.DB, target, src string, pairs [][2]string, capN int) (int64, bool, error) {
+	var conds []string
+	for _, p := range pairs {
+		conds = append(conds, "t."+quoteIdent(p[0])+"=s."+quoteIdent(p[1]))
+	}
 	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s s STRAIGHT_JOIN %s t ON %s LIMIT %d) x",
 		quoteIdent(src), quoteIdent(target), strings.Join(conds, " AND "), capN+1)
 	var n int64
@@ -1667,9 +1593,13 @@ func conflictCountCapped(db *sql.DB, target, src string, pk []string, capN int) 
 	return n, false, err
 }
 
-func conflictCount(db *sql.DB, target, src string, pk []string) (int64, error) {
-	n, _, err := conflictCountCapped(db, target, src, pk, 1000)
-	return n, err
+func conflictCountCapped(db *sql.DB, target, src string, pk []string, capN int) (int64, bool, error) {
+	// 用小批次表驱动，避免优化器拿几千万行的目标表当驱动表去全表扫
+	pairs := make([][2]string, 0, len(pk))
+	for _, c := range pk {
+		pairs = append(pairs, [2]string{c, c})
+	}
+	return conflictCountPairs(db, target, src, pairs, capN)
 }
 
 // 每张批次表的版本号：期望前缀的值 + 不该出现的值（标红用）
@@ -2188,42 +2118,47 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 			}
 			pk, idxName := mKeyCols(db, schema, target)
-			hasIdx, sample := false, ""
-			if len(pk) > 0 {
-				hasIdx, sample = mHasIndexFor(db, schema, target, pk)
-			}
+			// 判重列在源表里对应哪一列：SELECT 里换过顺序、写过表达式就说不准，不做结论
+			srcOf, mapOK := insertKeyMap(m[3], colList, pk)
 
-			// 源表行数 / 源表重复键 / 与目标表的主键冲突互不依赖，且都是重查询：并发跑
+			// 源表行数 / 源表重复键 / 与目标表的冲突互不依赖，且都是重查询：并发跑
 			var (
 				n, dup, conf                int64
 				capped, dupTrunc, confTrunc bool
-				dupErr, confErr             error
+				cntErr, dupErr, confErr     error
 				durCnt, durDup, durConf     time.Duration
 			)
 			tasks := []func(*sql.DB){func(c *sql.DB) {
 				t0 := time.Now()
-				n, capped = tableCountBounded(c, src, 300000)
+				n, capped, cntErr = tableCountBounded(c, src, 300000)
 				durCnt = time.Since(t0)
 			}}
-			if len(pk) > 0 {
+			if mapOK && len(pk) > 0 {
+				srcCols := make([]string, 0, len(pk))
+				pairs := make([][2]string, 0, len(pk))
+				for _, c := range pk {
+					srcCols = append(srcCols, srcOf[strings.ToUpper(c)])
+					pairs = append(pairs, [2]string{c, srcOf[strings.ToUpper(c)]})
+				}
 				tasks = append(tasks, func(c *sql.DB) {
 					t0 := time.Now()
-					dup, dupTrunc, dupErr = dupCountCapped(c, src, pk, 1000)
+					dup, dupTrunc, dupErr = dupCountCapped(c, src, srcCols, 1000)
 					durDup = time.Since(t0)
 				})
-				if hasIdx {
-					tasks = append(tasks, func(c *sql.DB) {
-						t0 := time.Now()
-						conf, confTrunc, confErr = conflictCountCapped(c, target, src, pk, 1000)
-						durConf = time.Since(t0)
-					})
-				}
+				tasks = append(tasks, func(c *sql.DB) {
+					t0 := time.Now()
+					conf, confTrunc, confErr = conflictCountPairs(c, target, src, pairs, 1000)
+					durConf = time.Since(t0)
+				})
 			}
 			conns.parallel(db, tasks...)
 
-			if n == 0 {
+			switch {
+			case cntErr != nil:
+				addD(i, "warn", "行数统计失败", fmt.Sprintf("%s 的行数没数出来（超时或权限）：%s。不影响执行，判重照常进行", src, withHint(cntErr.Error())), durCnt)
+			case n == 0:
 				addD(i, "warn", "源表为空", fmt.Sprintf("%s 没有数据，这条 INSERT 不会插入任何行", src), durCnt)
-			} else {
+			default:
 				label := fmt.Sprintf("%s 共 %d 行", src, n)
 				if capped {
 					label = fmt.Sprintf("%s 共 ≥%d 行", src, n)
@@ -2243,37 +2178,36 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					break
 				}
 			}
-			if n > 0 {
-				add(i, "ok", "预计影响行数", fmt.Sprintf("预计插入 %d 行（精确计数）", n))
-			}
-			if n > 0 {
-				if dupErr == nil && dup > 0 {
-					msg := fmt.Sprintf("%s 内有 %d 组重复主键，插入会失败", src, dup)
-					if dupTrunc {
-						msg = fmt.Sprintf("%s 内至少有 %d 组重复主键（数到 1000 就停了），插入会失败", src, dup)
-					}
-					addD(i, "error", "源表主键重复", msg, durDup)
-				}
-				if !hasIdx {
-					msg := fmt.Sprintf("%s 上没有以 (%s) 为最左前缀的索引，按这些列比对会全表扫", target, strings.Join(pk, ", "))
-					if sample != "" {
-						msg += fmt.Sprintf("；现有索引 %s 的前缀对不上", sample)
-					}
-					msg += "。请先建索引再预检，否则无法判断这批数据是否已执行过"
-					add(i, "error", "目标表缺少可用索引", msg)
-				} else if confErr == nil {
-					if conf > 0 {
-						msg := fmt.Sprintf("%s 已存在 %d 行相同主键，INSERT 会失败（大概率这批已执行过）", target, conf)
-						if confTrunc {
-							msg = fmt.Sprintf("%s 至少已存在 %d 行相同主键（数到 1000 就停了），INSERT 会失败（大概率这批已执行过）", target, conf)
-						}
-						addD(i, "error", "主键冲突", msg, durConf)
-					} else {
-						addD(i, "ok", "无主键冲突", fmt.Sprintf("与 %s 比对无重复", target), durConf)
-					}
+			if cntErr == nil && n > 0 {
+				if capped {
+					add(i, "warn", "预计影响行数", fmt.Sprintf("至少 %d 行（数到 30 万就停了，实际可能更多）", n))
 				} else {
-					add(i, "warn", "主键冲突检查未完成", "查询失败或超时（表可能很大）："+withHint(confErr.Error()))
+					add(i, "ok", "预计影响行数", fmt.Sprintf("预计插入 %d 行（精确计数）", n))
 				}
+			}
+			if !mapOK {
+				add(i, "warn", "判重未做自动比对", "SELECT 列表里有表达式、函数，或与列清单按位置对不上，无法确定插入值取自源表哪一列；请人工确认这批是否已执行过")
+				continue
+			}
+			if dupErr != nil {
+				add(i, "warn", "源表重复检查未完成", "查询失败或超时："+withHint(dupErr.Error()))
+			} else if dup > 0 {
+				msg := fmt.Sprintf("%s 内有 %d 组重复主键，插入会失败", src, dup)
+				if dupTrunc {
+					msg = fmt.Sprintf("%s 内至少有 %d 组重复主键（数到 1000 就停了），插入会失败", src, dup)
+				}
+				addD(i, "error", "源表主键重复", msg, durDup)
+			}
+			if confErr != nil {
+				add(i, "warn", "主键冲突检查未完成", "查询失败或超时（表可能很大）："+withHint(confErr.Error()))
+			} else if conf > 0 {
+				msg := fmt.Sprintf("%s 已存在 %d 行相同主键，INSERT 会失败（大概率这批已执行过）", target, conf)
+				if confTrunc {
+					msg = fmt.Sprintf("%s 至少已存在 %d 行相同主键（数到 1000 就停了），INSERT 会失败（大概率这批已执行过）", target, conf)
+				}
+				addD(i, "error", "主键冲突", msg, durConf)
+			} else {
+				addD(i, "ok", "无主键冲突", fmt.Sprintf("与 %s 比对无重复", target), durConf)
 			}
 		case stmtKind(st) == "update":
 			m := reUpdate.FindStringSubmatch(st)
@@ -2385,6 +2319,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			type srcCnt struct {
 				n      int64
 				capped bool
+				err    error
 				dur    time.Duration
 			}
 			var (
@@ -2407,9 +2342,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				rt := r.table
 				tasks = append(tasks, func(c *sql.DB) {
 					t0 := time.Now()
-					n, capped := tableCountBounded(c, rt, 300000)
+					n, capped, cerr := tableCountBounded(c, rt, 300000)
 					cntMu.Lock()
-					cnts[rt] = srcCnt{n: n, capped: capped, dur: time.Since(t0)}
+					cnts[rt] = srcCnt{n: n, capped: capped, err: cerr, dur: time.Since(t0)}
 					cntMu.Unlock()
 				})
 			}
@@ -2440,7 +2375,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					continue
 				}
 				cr := cnts[r.table]
-				if cr.n == 0 {
+				if cr.err != nil {
+					addD(i, "warn", "行数统计失败", fmt.Sprintf("%s（别名 %s）的行数没数出来（超时或权限）：%s", r.table, r.alias, withHint(cr.err.Error())), cr.dur)
+				} else if cr.n == 0 {
 					addD(i, "warn", "源表为空", fmt.Sprintf("%s（别名 %s）没有数据，这条 UPDATE 不会命中任何行", r.table, r.alias), cr.dur)
 				} else {
 					label := fmt.Sprintf("%s（别名 %s）共 %d 行", r.table, r.alias, cr.n)
@@ -2473,7 +2410,13 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		}
 	}
 
-	for t, uses := range targetUse {
+	useTables := make([]string, 0, len(targetUse))
+	for t := range targetUse {
+		useTables = append(useTables, t)
+	}
+	sort.Strings(useTables)
+	for _, t := range useTables {
+		uses := targetUse[t]
 		if len(uses) < 2 {
 			continue
 		}

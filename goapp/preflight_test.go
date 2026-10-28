@@ -196,3 +196,84 @@ func TestPreflightInsertConflictParallel(t *testing.T) {
 		t.Fatalf("大表冲突未检出，实际: %v", titles(checks))
 	}
 }
+
+// INSERT ... SELECT 的列对应关系：普通列要认，换顺序要认，表达式一律不下结论
+func TestInsertKeyMap(t *testing.T) {
+	pk := []string{"X", "Y"}
+	cases := []struct {
+		name    string
+		sel     string
+		colList string
+		want    map[string]string
+		ok      bool
+	}{
+		{"同名直取", "select x, y from s", "x, y", map[string]string{"X": "X", "Y": "Y"}, true},
+		{"换顺序", "select y, x from s", "x, y", map[string]string{"X": "Y", "Y": "X"}, true},
+		{"带别名前缀", "select a.x as xx, a.y from s a", "x, y", map[string]string{"X": "X", "Y": "Y"}, true},
+		{"整表投影", "select * from s", "", map[string]string{"X": "X", "Y": "Y"}, true},
+		{"整表投影换行", "select *\nfrom s", "", map[string]string{"X": "X", "Y": "Y"}, true},
+		{"整表投影带别名", "select a.* from s a", "", map[string]string{"X": "X", "Y": "Y"}, true},
+		{"表达式不给结论", "select x+1, y from s", "x, y", map[string]string{}, false},
+		{"常量不给结论", "select 'A', y from s", "x, y", map[string]string{}, false},
+		{"列数对不上", "select x from s", "x, y", map[string]string{}, false},
+		{"列清单缺判重列", "select x from s", "x", map[string]string{}, false},
+		{"映射到别的源列", "select x, z from s", "x, y", map[string]string{"X": "X", "Y": "Z"}, true},
+	}
+	for _, c := range cases {
+		got, ok := insertKeyMap(c.sel, c.colList, pk)
+		if ok != c.ok {
+			t.Fatalf("%s: ok=%v 期望 %v（got=%v）", c.name, ok, c.ok, got)
+		}
+		if !ok {
+			continue
+		}
+		for k, v := range c.want {
+			if got[k] != v {
+				t.Fatalf("%s: 映射 %s→%s，期望 %s", c.name, k, got[k], v)
+			}
+		}
+	}
+}
+
+// 回归：SELECT 里把两列调换顺序时，冲突判断必须按映射后的列比，不能按同名列比
+func TestPreflightInsertReorderedColumns(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+
+	setup := []string{
+		"DROP TABLE IF EXISTS pf_swap_tgt",
+		"DROP TABLE IF EXISTS pf_swap_src",
+		"CREATE TABLE pf_swap_tgt (x VARCHAR(8) NOT NULL, y VARCHAR(8) NOT NULL, PRIMARY KEY (x, y))",
+		"CREATE TABLE pf_swap_src (x VARCHAR(8) NOT NULL, y VARCHAR(8) NOT NULL)",
+		"INSERT INTO pf_swap_tgt VALUES ('q','p')",
+		"INSERT INTO pf_swap_src VALUES ('p','q')",
+	}
+	for _, st := range setup {
+		if _, err := db.Exec(st); err != nil {
+			t.Fatalf("准备数据失败(%s): %v", st, err)
+		}
+	}
+	defer func() {
+		db.Exec("DROP TABLE IF EXISTS pf_swap_tgt")
+		db.Exec("DROP TABLE IF EXISTS pf_swap_src")
+	}()
+
+	// 实际插入的是 (y,x) = ('q','p')，与目标表已有行冲突；按同名列比会漏报
+	checks := runPf(t, ds, "INSERT INTO pf_swap_tgt (x, y) SELECT y, x FROM pf_swap_src")
+	if !hasTitle(checks, "主键冲突") {
+		t.Fatalf("调换列顺序后应检出主键冲突，实际: %v", titles(checks))
+	}
+
+	// SELECT 里写表达式 → 不给冲突结论，改为提示人工核对
+	checks = runPf(t, ds, "INSERT INTO pf_swap_tgt (x, y) SELECT CONCAT(x,''), y FROM pf_swap_src")
+	if hasTitle(checks, "无主键冲突") || hasTitle(checks, "主键冲突") {
+		t.Fatalf("表达式无法判断时不应给冲突结论，实际: %v", titles(checks))
+	}
+	if !hasTitle(checks, "判重未做自动比对") {
+		t.Fatalf("应提示无法自动比对，实际: %v", titles(checks))
+	}
+}

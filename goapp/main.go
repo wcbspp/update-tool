@@ -1002,6 +1002,25 @@ func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
 	return 0, false
 }
 
+// countWhereBounded：按条件有界计数，最多数到 cap 行就停
+func countWhereBounded(db *sql.DB, from, where string, cap int64, pfSec int) (int64, bool, error) {
+	q := "SELECT COUNT(*) FROM (SELECT 1 FROM " + from
+	if strings.TrimSpace(where) != "" {
+		q += " WHERE " + where
+	}
+	q += fmt.Sprintf(" LIMIT %d) x", cap+1)
+	ctx, cancel := pfCtx(pfSec)
+	defer cancel()
+	var n int64
+	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
+		return 0, false, err
+	}
+	if n > cap {
+		return cap, true, nil
+	}
+	return n, false, nil
+}
+
 // tableCountBounded：最多数到 cap 行就停，避免大表全表扫描。
 // 第三个返回值区分「真的是 0 行」和「没数出来（超时/权限）」——
 // 两者绝不能混为一谈：把超时当成空表会让用户去重灌数据。
@@ -1660,6 +1679,15 @@ func versionReport(db *sql.DB, schema string, tables []string, col string, pfxs 
 			continue
 		}
 
+		if len(pfxs) == 0 {
+			// 没配前缀：列出表里实际出现的值，并说明是“没配”而不是“没数据”
+			vals := distinctVals(db, t, col, 21)
+			out = append(out, map[string]any{
+				"table": t, "field": col, "ok": vals, "other": []string{}, "missing": false,
+				"note": "未配置版本前缀，仅列出该字段现有值",
+			})
+			continue
+		}
 		conds := make([]string, 0, len(pfxs))
 		for _, p := range pfxs {
 			conds = append(conds, quoteIdent(col)+" LIKE '"+strings.ReplaceAll(p, "'", "''")+"%'")
@@ -1674,14 +1702,7 @@ func versionReport(db *sql.DB, schema string, tables []string, col string, pfxs 
 				return nil
 			}
 			defer rows.Close()
-			vals := make([]string, 0)
-			for rows.Next() {
-				var v sql.NullString
-				if rows.Scan(&v) == nil && v.Valid {
-					vals = append(vals, v.String)
-				}
-			}
-			return vals
+			return scanVals(rows)
 		}
 
 		okVals := pick(match, 21)
@@ -2074,10 +2095,14 @@ func validateText(raw string) []map[string]any {
 }
 
 // 检出库里已改数据但还没提交的事务——解释“我明明删了，工具还看得见”
-func trxWarnings(db *sql.DB) []map[string]any {
+func trxWarnings(db *sql.DB, schema string) []map[string]any {
 	out := make([]map[string]any, 0)
-	rows, err := db.Query(`SELECT trx_id, DATE_FORMAT(trx_started,'%H:%i:%s'), trx_rows_modified
-		FROM information_schema.INNODB_TRX WHERE trx_rows_modified > 0`)
+	// 只看当前库的事务：INNODB_TRX 本身不带库名，借 PROCESSLIST 关联。
+	// 中间件上这两张表常被限制，查不到就静默跳过（这条只是提醒）。
+	rows, err := db.Query(`SELECT t.trx_id, DATE_FORMAT(t.trx_started,'%H:%i:%s'), t.trx_rows_modified
+		FROM information_schema.INNODB_TRX t
+		JOIN information_schema.PROCESSLIST p ON p.id = t.trx_mysql_thread_id
+		WHERE t.trx_rows_modified > 0 AND (p.db = ? OR ? = '')`, schema, schema)
 	if err != nil {
 		return out
 	}
@@ -2452,8 +2477,17 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			if !reWhereWord.MatchString(st) {
 				add(i, "warn", "没有 WHERE 条件", "这条 DELETE 会清空整张表，请确认不是笔误")
 			}
-			if n, ok := estimateByExplain(db, st, target, ""); ok {
-				add(i, "ok", "预计影响行数", fmt.Sprintf("预计删除 %d 行", n))
+			tDel := time.Now()
+			where := whereRaw(st)
+			if n, capped, err := countWhereBounded(db, qualTable(schema, target), where, 300000, pfSec); err == nil {
+				switch {
+				case capped:
+					addD(i, "warn", "预计影响行数", fmt.Sprintf("至少 %d 行（数到 30 万就停了，实际可能更多）", n), time.Since(tDel))
+				default:
+					addD(i, "ok", "预计影响行数", fmt.Sprintf("预计删除 %d 行（精确计数，最多数 30 万）", n), time.Since(tDel))
+				}
+			} else if n, ok := estimateByExplain(db, st, target, ""); ok {
+				add(i, "warn", "预计影响行数", fmt.Sprintf("约 %d 行（按执行计划估算，行数没数完）", n))
 			} else {
 				add(i, "warn", "预计影响行数未计算", "查询超时或语句太复杂（大表上常见），不影响执行")
 			}
@@ -2501,7 +2535,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		defer conns.give(c)
 		versions = versionReport(c, schema, batchTables, verColName, verPfxs)
 	}()
-	out = append(out, trxWarnings(db)...)
+	out = append(out, trxWarnings(db, schema)...)
 	vwg.Wait()
 	return out, versions, nil
 }
@@ -3992,4 +4026,26 @@ func lanIPs() []string {
 		}
 	}
 	return out
+}
+
+// distinctVals：某列的前 n 个不同值（非空）
+func distinctVals(db *sql.DB, table, col string, limit int) []string {
+	rows, err := db.Query(fmt.Sprintf("SELECT DISTINCT %s FROM %s WHERE %s IS NOT NULL LIMIT %d",
+		quoteIdent(col), quoteIdent(table), quoteIdent(col), limit))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	return scanVals(rows)
+}
+
+func scanVals(rows *sql.Rows) []string {
+	vals := make([]string, 0)
+	for rows.Next() {
+		var v sql.NullString
+		if rows.Scan(&v) == nil && v.Valid {
+			vals = append(vals, v.String)
+		}
+	}
+	return vals
 }

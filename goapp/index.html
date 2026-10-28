@@ -1487,6 +1487,9 @@ function versionsHTML(versions) {
       h += `<div class="vrow"><span class="vt">${esc(v.table)}</span><span class="vt">无 ${esc(v.field)} 字段</span></div>`;
       continue;
     }
+    if (v.note) {
+      h += `<div class="vrow"><span class="vt">${esc(v.table)}</span><span class="vt">${esc(v.note)}</span></div>`;
+    }
     const ok = (v.ok || []).map(x => `<span class="vtag">${esc(x)}</span>`).join('');
     const bad = (v.other || []).map(x => `<span class="vtag bad">${esc(x)}</span>`).join('');
     h += `<div class="vrow"><span class="vt">${esc(v.table)}</span><span>${ok}${bad}</span></div>`;

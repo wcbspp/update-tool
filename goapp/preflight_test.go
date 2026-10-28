@@ -277,3 +277,75 @@ func TestPreflightInsertReorderedColumns(t *testing.T) {
 		t.Fatalf("应提示无法自动比对，实际: %v", titles(checks))
 	}
 }
+
+// DELETE 走有界精确计数（不是执行计划估算）
+func TestPreflightDeleteExactCount(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+	for _, st := range []string{
+		"DROP TABLE IF EXISTS pf_del",
+		"CREATE TABLE pf_del (id INT NOT NULL PRIMARY KEY, flag INT)",
+		"INSERT INTO pf_del VALUES (1,1),(2,1),(3,1),(4,0),(5,0)",
+	} {
+		if _, err := db.Exec(st); err != nil {
+			t.Fatalf("准备失败(%s): %v", st, err)
+		}
+	}
+	defer db.Exec("DROP TABLE IF EXISTS pf_del")
+
+	checks := runPf(t, ds, "DELETE FROM pf_del WHERE flag=1")
+	found := false
+	for _, c := range checks {
+		if s, _ := c["title"].(string); strings.Contains(s, "预计影响行数") {
+			d, _ := c["detail"].(string)
+			if !strings.Contains(d, "预计删除 3 行") || !strings.Contains(d, "精确计数") {
+				t.Fatalf("应给出精确行数 3，实际: %s", d)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("应输出预计影响行数，实际: %v", titles(checks))
+	}
+}
+
+// 没配版本前缀时，列出实际值并说明“未配置”，不能拼出 WHERE ()
+func TestPreflightVersionWithoutPrefixes(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+	for _, st := range []string{
+		"DROP TABLE IF EXISTS pf_batch_x_update_1",
+		"CREATE TABLE pf_batch_x_update_1 (CODE VARCHAR(8), CRTER_ID VARCHAR(16))",
+		"INSERT INTO pf_batch_x_update_1 VALUES ('A','NV1'),('B','LC2')",
+	} {
+		if _, err := db.Exec(st); err != nil {
+			t.Fatalf("准备失败(%s): %v", st, err)
+		}
+	}
+	defer db.Exec("DROP TABLE IF EXISTS pf_batch_x_update_1")
+
+	// 语句里要引用批次表，预检才会把它当版本核对对象
+	checks, versions, err := preflight(ds, splitStatements("UPDATE pf_batch_x_update_1 SET CODE='A' WHERE CODE='A'"), "CRTER_ID", nil)
+	if err != nil {
+		t.Fatalf("预检失败: %v", err)
+	}
+	_ = checks
+	if len(versions) != 1 {
+		t.Fatalf("应返回 1 张批次表，实际 %d", len(versions))
+	}
+	v := versions[0]
+	if s, _ := v["note"].(string); !strings.Contains(s, "未配置") {
+		t.Fatalf("应说明未配置前缀，实际: %v", v)
+	}
+	if vals, _ := v["ok"].([]string); len(vals) != 2 {
+		t.Fatalf("应列出 2 个实际值，实际: %v", v["ok"])
+	}
+}

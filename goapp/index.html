@@ -617,7 +617,8 @@
     border-radius:50%;animation:spn .9s linear infinite}
   @keyframes spn{to{transform:rotate(360deg)}}
   .busyT{font-size:13.5px;color:#e8eef7}
-  .busyS{font-size:11.5px;color:#9fb0c6}
+  .busyS{font-size:11.5px;color:#9fb0c6;font-variant-numeric:tabular-nums}
+  .busyNum{display:inline-block;min-width:3.2em;text-align:right}
 </style>
 </head>
 <body>
@@ -1664,17 +1665,21 @@ async function run(dryRun) {
 let BUSY_TIMER = null, BUSY_T0 = 0;
 
 function showBusy(msg) {
+  // 只建一次 DOM，之后只改秒数文本：
+  // 每帧重绘 innerHTML 会重建转圈元素，CSS 动画从头播放，看起来像在抖。
+  hideBusy();
   BUSY_T0 = Date.now();
+  $('res').innerHTML = `<div class="busy">
+    <div class="spin"></div>
+    <div class="busyT">${esc(msg)}</div>
+    <div class="busyS"><span class="busyNum">0.0</span> 秒 · 大表统计可能需要几分钟；超时会显示「未计算」</div>
+  </div>`;
+  const num = $('res').querySelector('.busyNum');
   const paint = () => {
-    const sec = ((Date.now() - BUSY_T0) / 1000).toFixed(1);
-    $('res').innerHTML = `<div class="busy">
-      <div class="spin"></div>
-      <div class="busyT">${esc(msg)}</div>
-      <div class="busyS">已用 ${sec} 秒 · 大表统计可能需要几分钟；若被 DQL 超时打断，会显示「未计算」</div>
-    </div>`;
+    if (!num) return;
+    num.textContent = ((Date.now() - BUSY_T0) / 1000).toFixed(1);
   };
   paint();
-  if (BUSY_TIMER) clearInterval(BUSY_TIMER);
   BUSY_TIMER = setInterval(paint, 100);
 }
 

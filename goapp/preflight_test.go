@@ -127,3 +127,72 @@ func TestPreflightMultiStatementSameTable(t *testing.T) {
 		t.Fatalf("应给出同表多语句的结论，实际: %v", titles(checks))
 	}
 }
+
+// 并发化之后结果必须不变：有冲突、无冲突、冲突数到上限就停
+func TestPreflightInsertConflictParallel(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+
+	setup := []string{
+		"DROP TABLE IF EXISTS pf_tgt2",
+		"DROP TABLE IF EXISTS pf_src2",
+		"DROP TABLE IF EXISTS pf_src_big",
+		"DROP TABLE IF EXISTS pf_tgt_big",
+		"CREATE TABLE pf_tgt2 (id INT NOT NULL PRIMARY KEY, code VARCHAR(8))",
+		"CREATE TABLE pf_src2 (id INT NOT NULL PRIMARY KEY, code VARCHAR(8))",
+		"DROP TABLE IF EXISTS pf_src3",
+		"CREATE TABLE pf_src3 (id INT NOT NULL PRIMARY KEY, code VARCHAR(8))",
+		"INSERT INTO pf_tgt2 VALUES (1,'A')",
+		"INSERT INTO pf_src2 VALUES (1,'A'),(2,'B')",
+		"INSERT INTO pf_src3 VALUES (101,'A'),(102,'B')",
+		"CREATE TABLE pf_src_big (id INT NOT NULL PRIMARY KEY, code VARCHAR(8))",
+		"INSERT INTO pf_src_big VALUES (1,'X')",
+	}
+	for i := 0; i < 11; i++ {
+		setup = append(setup, "INSERT INTO pf_src_big SELECT id + (SELECT MAX(id) FROM pf_src_big), 'X' FROM pf_src_big")
+	}
+	setup = append(setup,
+		"CREATE TABLE pf_tgt_big (id INT NOT NULL PRIMARY KEY, code VARCHAR(8))",
+		"INSERT INTO pf_tgt_big SELECT id, code FROM pf_src_big WHERE id <= 1500",
+	)
+	for _, st := range setup {
+		if _, err := db.Exec(st); err != nil {
+			t.Fatalf("准备数据失败(%s): %v", st, err)
+		}
+	}
+	defer func() {
+		for _, st := range []string{"DROP TABLE IF EXISTS pf_tgt2", "DROP TABLE IF EXISTS pf_src2", "DROP TABLE IF EXISTS pf_src3", "DROP TABLE IF EXISTS pf_src_big", "DROP TABLE IF EXISTS pf_tgt_big"} {
+			db.Exec(st)
+		}
+	}()
+
+	checks := runPf(t, ds, "INSERT INTO pf_tgt2 (id, code) SELECT id, code FROM pf_src2")
+	if !hasTitle(checks, "主键冲突") {
+		t.Fatalf("应报主键冲突，实际: %v", titles(checks))
+	}
+
+	// 用一张本来就不冲突的源表（不是靠 SELECT 里改值：判重只比源表主键列）
+	checks = runPf(t, ds, "INSERT INTO pf_tgt2 (id, code) SELECT id, code FROM pf_src3")
+	if !hasTitle(checks, "无主键冲突") {
+		t.Fatalf("应报无主键冲突，实际: %v", titles(checks))
+	}
+
+	checks = runPf(t, ds, "INSERT INTO pf_tgt_big (id, code) SELECT id, code FROM pf_src_big")
+	found := false
+	for _, c := range checks {
+		if s, _ := c["title"].(string); strings.Contains(s, "主键冲突") {
+			d, _ := c["detail"].(string)
+			if !strings.Contains(d, "至少") || !strings.Contains(d, "1000") {
+				t.Fatalf("冲突超过上限时应说明数到 1000 就停，实际: %s", d)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("大表冲突未检出，实际: %v", titles(checks))
+	}
+}

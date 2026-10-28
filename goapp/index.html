@@ -558,6 +558,27 @@
   .gh{display:inline-flex;align-items:center;justify-content:center;color:#8fa3bd;
     margin-left:8px;opacity:.75;transition:.15s;text-decoration:none}
   .gh:hover{opacity:1;color:#fff;transform:translateY(-1px)}
+  /* ---- 顶部可读性 ---- */
+  header{height:50px;padding:0 16px;gap:11px;
+    background:linear-gradient(180deg,#101821,#0b1119);border-bottom:1px solid #2f3d52}
+  header h1{font-size:16px;font-weight:700;color:#ffffff;letter-spacing:.02em}
+  .verPill{display:inline-flex;align-items:center;gap:7px;padding:3px 10px;border-radius:999px;
+    background:#131b26;border:1px solid #2f3d52;color:#b9c8dc;cursor:pointer;
+    font:11.5px ui-monospace,Menlo,monospace;line-height:1.6;transition:.15s}
+  .verPill:hover{border-color:#4d7fbf;color:#e9f1fc;background:#17222f}
+  .verPill.has-upd{border-color:#7a3f41}
+  .ghBtn{display:inline-flex;align-items:center;justify-content:center;width:27px;height:27px;padding:0;
+    border-radius:8px;background:#131b26;border:1px solid #2f3d52;color:#c8d6e8;cursor:pointer;transition:.15s}
+  .ghBtn:hover{background:#182333;border-color:#4d7fbf;color:#ffffff}
+  .ghBtn:active{transform:translateY(1px)}
+  header .who{font-size:11.5px;color:#c3d2e6}
+  header .sm{font-size:12px}
+  .repoBox a{display:inline-flex;align-items:center;gap:6px}
+  .repoIco{display:inline-flex;color:#9fb3cd}
+  .repoBox a:hover .repoIco{color:#fff}
+  .verPill .ghBtn{width:17px;height:17px;margin-left:1px;border:0;background:transparent;
+    border-radius:4px;color:#9fb2cb;padding:0}
+  .verPill .ghBtn:hover{background:#1d2b3d;color:#ffffff}
 </style>
 </head>
 <body>
@@ -565,8 +586,7 @@
 <header>
   <div class="brand">
     <h1>update-tool</h1>
-    <span class="ver" id="verTag" title="点击检查更新">v1.0.2 · 创意 by 吴美丽<span class="upd-dot" id="updDot" style="display:none"></span></span>
-    <a class="gh" href="https://github.com/wcbspp/medupdate-tool" target="_blank" rel="noopener" title="GitHub 仓库" aria-label="GitHub 仓库"><svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+    <span class="verPill" id="verTag" title="点击查看版本信息"><span id="verText">v1.0.2 · 创意 by 吴美丽</span><span class="upd-dot" id="updDot" style="display:none"></span><button class="ghBtn" id="ghBtn" title="关于与版本" aria-label="关于与版本"><svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></button></span>
   </div>
   <span class="who" id="who"></span>
   <span style="flex:1"></span>
@@ -1884,7 +1904,7 @@ function openUpdate() {
     ${body}
     <div class="repoBox">
       <span class="repoLbl">仓库</span>
-      <a href="${REPO_URL}" target="_blank" rel="noopener">${esc(REPO_URL.replace('https://github.com/', ''))} ↗</a>
+      <a href="${REPO_URL}" target="_blank" rel="noopener"><span class="repoIco"><svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></span>${esc(REPO_URL.replace('https://github.com/', ''))} ↗</a>
     </div>
     <div class="foot"><span class="l"></span>
       <button id="uCancel">关闭</button>
@@ -2077,15 +2097,16 @@ function initResizer() {
     let BOOTED_BUILD = '';
     const vt = $('verTag');
     if (vt) vt.onclick = () => openUpdate();
+    const gb = $('ghBtn');
+    if (gb) gb.onclick = () => openUpdate();
     setTimeout(() => { try { checkUpdate(); } catch (e) {} }, 1200);
     fetch('/api/health').then(r => r.json()).then(h => {
       if (!h || !h.build) return;
       BOOTED_BUILD = h.build;
       const vtag = $('verTag');
       if (h.version) APP_VERSION = h.version;
-      if (vtag && h.version && vtag.firstChild) {
-        vtag.firstChild.nodeValue = 'v' + h.version + ' · 创意 by 吴美丽';
-      }
+      const vtxt = $('verText');
+      if (vtxt && h.version) vtxt.textContent = 'v' + h.version + ' · 创意 by 吴美丽';
     }).catch(() => {});
     setInterval(() => {
       if (!BOOTED_BUILD) return;

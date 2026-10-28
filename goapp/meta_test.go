@@ -27,12 +27,9 @@ func TestMetadataFallbackWhenInformationSchemaBlocked(t *testing.T) {
 	}
 	defer func() { _, _ = db.Exec("DROP TABLE IF EXISTS meta_probe") }()
 
-	oldQ, oldQR := infQuery, infQueryRow
+	oldQ := infQuery
 	infQuery = func(*sql.DB, string, ...any) (*sql.Rows, error) { return nil, errors.New("blocked by middleware") }
-	infQueryRow = func(db *sql.DB, _ string, _ ...any) *sql.Row {
-		return db.QueryRow("SELECT 1 WHERE 1=0") // 始终 0 行 → Scan 返回 sql.ErrNoRows
-	}
-	defer func() { infQuery, infQueryRow = oldQ, oldQR }()
+	defer func() { infQuery = oldQ }()
 
 	// 索引：应回退 SHOW INDEX，拿到主键列
 	cols, name := keyCols(db, ds.Database, "meta_probe")

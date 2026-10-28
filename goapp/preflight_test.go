@@ -371,3 +371,111 @@ func TestPreflightVersionWithoutPrefixes(t *testing.T) {
 		t.Fatalf("应列出 2 个实际值，实际: %v", v["ok"])
 	}
 }
+
+// 没配版本字段时不应产生版本核对块（否则界面显示一堆“无  字段”）
+func TestPreflightNoVersionColumnSkipsCheck(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("DROP TABLE IF EXISTS pf_nv_update_1"); err != nil {
+		t.Fatalf("准备失败: %v", err)
+	}
+	if _, err := db.Exec("CREATE TABLE pf_nv_update_1 (CODE VARCHAR(8))"); err != nil {
+		t.Fatalf("准备失败: %v", err)
+	}
+	defer db.Exec("DROP TABLE IF EXISTS pf_nv_update_1")
+
+	_, versions, err := preflight(ds, splitStatements("UPDATE pf_nv_update_1 SET CODE='A' WHERE CODE='A'"), "", nil)
+	if err != nil {
+		t.Fatalf("预检失败: %v", err)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("没配版本字段不应有版本块，实际 %v", versions)
+	}
+}
+
+// 回归：WHERE 里带子查询的单表 DELETE 不能被当成多表 DELETE
+func TestPreflightDeleteWithSubquery(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+	for _, st := range []string{
+		"DROP TABLE IF EXISTS pf_dq", "DROP TABLE IF EXISTS pf_dq_src",
+		"CREATE TABLE pf_dq (id INT NOT NULL PRIMARY KEY)",
+		"CREATE TABLE pf_dq_src (id INT NOT NULL PRIMARY KEY)",
+		"INSERT INTO pf_dq VALUES (1),(2),(3)",
+		"INSERT INTO pf_dq_src VALUES (1)",
+	} {
+		if _, err := db.Exec(st); err != nil {
+			t.Fatalf("准备失败(%s): %v", st, err)
+		}
+	}
+	defer func() {
+		db.Exec("DROP TABLE IF EXISTS pf_dq")
+		db.Exec("DROP TABLE IF EXISTS pf_dq_src")
+	}()
+
+	checks := runPf(t, ds, "DELETE FROM pf_dq WHERE id IN (SELECT id FROM pf_dq_src)")
+	if hasTitle(checks, "多表 DELETE") {
+		t.Fatalf("单表 + 子查询不该判成多表，实际: %v", titles(checks))
+	}
+	foundTbl, foundCnt := false, false
+	for _, c := range checks {
+		if s, _ := c["title"].(string); s == "被删除表" {
+			if d, _ := c["detail"].(string); d == "pf_dq" {
+				foundTbl = true
+			}
+		}
+		if s, _ := c["title"].(string); strings.Contains(s, "预计影响行数") {
+			foundCnt = true
+		}
+	}
+	if !foundTbl || !foundCnt {
+		t.Fatalf("应识别表名并给行数，实际: %v / %v", titles(checks), checks)
+	}
+
+	checks = runPf(t, ds, "DELETE IGNORE FROM pf_dq WHERE id=1")
+	for _, c := range checks {
+		if s, _ := c["title"].(string); s == "被删除表" {
+			if d, _ := c["detail"].(string); d != "pf_dq" {
+				t.Fatalf("DELETE IGNORE 的表名应解析为 pf_dq，实际 %q", d)
+			}
+		}
+	}
+}
+
+// 回归：SET 里带子查询、但没有外层 WHERE 的 UPDATE 必须报错
+func TestPreflightUpdateSubqueryNoWhere(t *testing.T) {
+	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
+	db, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer db.Close()
+	for _, st := range []string{
+		"DROP TABLE IF EXISTS pf_uw", "DROP TABLE IF EXISTS pf_uw_src",
+		"CREATE TABLE pf_uw (id INT NOT NULL PRIMARY KEY, v VARCHAR(8))",
+		"CREATE TABLE pf_uw_src (id INT NOT NULL PRIMARY KEY)",
+		"INSERT INTO pf_uw VALUES (1,'a')",
+		"INSERT INTO pf_uw_src VALUES (1)",
+	} {
+		if _, err := db.Exec(st); err != nil {
+			t.Fatalf("准备失败(%s): %v", st, err)
+		}
+	}
+	defer func() {
+		db.Exec("DROP TABLE IF EXISTS pf_uw")
+		db.Exec("DROP TABLE IF EXISTS pf_uw_src")
+	}()
+
+	checks := runPf(t, ds, "UPDATE pf_uw SET v=(SELECT 'x' FROM pf_uw_src WHERE pf_uw_src.id=pf_uw.id)")
+	if !hasTitle(checks, "没有 WHERE 条件") {
+		t.Fatalf("SET 里的子查询不能算 WHERE，实际: %v", titles(checks))
+	}
+}

@@ -1044,8 +1044,6 @@ func parseTableRef(p string) (string, string) {
 
 type tblRef struct{ table, alias string }
 
-// 表行数的近似值，来自 information_schema，不扫表
-
 // 用执行计划估算影响行数：不执行查询，只看 EXPLAIN 的 rows
 func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
 	rows, err := db.Query("EXPLAIN " + st)
@@ -1166,9 +1164,6 @@ func qualTable(schema, table string) string {
 // 元数据查询入口，测试里可替换以模拟「中间件限制 information_schema」
 var infQuery = func(db *sql.DB, q string, args ...any) (*sql.Rows, error) {
 	return db.Query(q, args...)
-}
-var infQueryRow = func(db *sql.DB, q string, args ...any) *sql.Row {
-	return db.QueryRow(q, args...)
 }
 
 /* ---------------- 预检元数据缓存 ---------------- */
@@ -1777,15 +1772,6 @@ func conflictCountPairs(db *sql.DB, target, src string, pairs [][2]string, capN,
 	return n, false, err
 }
 
-func conflictCountCapped(db *sql.DB, target, src string, pk []string, capN, pfSec int) (int64, bool, error) {
-	// 用小批次表驱动，避免优化器拿几千万行的目标表当驱动表去全表扫
-	pairs := make([][2]string, 0, len(pk))
-	for _, c := range pk {
-		pairs = append(pairs, [2]string{c, c})
-	}
-	return conflictCountPairs(db, target, src, pairs, capN, pfSec)
-}
-
 // 每张批次表的版本号：期望前缀的值 + 不该出现的值（标红用）
 func versionReport(db *sql.DB, schema string, tables []string, col string, pfxs []string, pfSec int) []map[string]any {
 	out := make([]map[string]any, 0, len(tables))
@@ -2002,17 +1988,6 @@ func deleteLimit(st string) int64 {
 		return 0
 	}
 	return n
-}
-
-func whereOf(st string) string {
-	w := whereTail(st)
-	if w == "" {
-		return ""
-	}
-	if len([]rune(w)) > 400 {
-		w = string([]rune(w)[:400]) + "…"
-	}
-	return w
 }
 
 func trimIdent(s string) string { return strings.Trim(s, "`\"") }
@@ -2724,8 +2699,6 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				multi = true // USING 的 WHERE 通常引用关联表，单表计数必然失败，走 EXPLAIN
 			case reDeleteSingle.MatchString(st), reDelete.MatchString(st) && !reDeleteMulti.MatchString(st):
 				// 单表（WHERE 里可以有子查询）
-				mm := reDeleteUsing.FindStringSubmatch(st)
-				_ = mm
 				m := reDelete.FindStringSubmatch(st)
 				if m == nil {
 					continue

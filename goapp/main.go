@@ -652,7 +652,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.0.14"
+const appVersion = "1.0.15"
 
 var runMu sync.Mutex
 

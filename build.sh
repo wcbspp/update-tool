@@ -31,5 +31,6 @@ if [ -d "$APP" ]; then
   echo "   app 已同步"
 fi
 
+echo "$BT" > ../build_id.txt
 ls -lh ../release-win/medupdate.exe ../release-mac/medupdate ../release-linux/medupdate
 if [ -d "$APP" ]; then ls -l "$APP/Contents/MacOS/medupdate"; fi

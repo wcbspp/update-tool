@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -3166,7 +3168,57 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// -mkrelease：由程序自己生成 version.json 与 SHA256SUMS，发版不依赖外部脚本
+func makeRelease(args []string) {
+	fs := flag.NewFlagSet("mkrelease", flag.ExitOnError)
+	dir := fs.String("dir", ".", "包含安装包的目录")
+	ver := fs.String("version", "", "版本号，例如 1.0.5")
+	build := fs.String("build", buildTime, "构建号")
+	notes := fs.String("notes", "", "更新说明")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if *ver == "" {
+		fmt.Fprintln(os.Stderr, "缺少 -version")
+		os.Exit(2)
+	}
+	files := map[string]any{}
+	sums := make([]string, 0, 2)
+	for _, osname := range []string{"win", "mac"} {
+		name := fmt.Sprintf("medupdate-%s-%s.bin", osname, *ver)
+		p := filepath.Join(*dir, name)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "读不到 %s：%v\n", p, err)
+			os.Exit(2)
+		}
+		sum := sha256.Sum256(b)
+		hexs := hex.EncodeToString(sum[:])
+		files[osname] = map[string]string{"url": name, "sha256": hexs}
+		sums = append(sums, hexs+"  "+name)
+	}
+	man := map[string]any{"version": *ver, "build": *build, "notes": *notes, "files": files}
+	mj, err := json.MarshalIndent(man, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if err := os.WriteFile(filepath.Join(*dir, "version.json"), append(mj, '\n'), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if err := os.WriteFile(filepath.Join(*dir, "SHA256SUMS"), []byte(strings.Join(sums, "\n")+"\n"), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	fmt.Printf("已生成 %s/version.json（%s，%s）\n", *dir, *ver, *build)
+}
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "-mkrelease" {
+		makeRelease(os.Args[2:])
+		return
+	}
 	appHome = os.Getenv("SQLC_HOME")
 	if appHome == "" {
 		exe, err := os.Executable()

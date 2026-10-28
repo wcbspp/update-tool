@@ -1335,6 +1335,23 @@ func indexesOf(db *sql.DB, schema, t string) (map[string][]string, []string) {
 }
 
 // hasIndexFor: 是否存在以 joinCols 为最左前缀的索引；第二个返回值用于提示现有索引长什么样
+// 列出表上现有索引，形如 IDX_X(col1,col2)，最多 3 个
+func indexNamesOf(db *sql.DB, schema, table string) []string {
+	idx, order := indexesOf(db, schema, table)
+	out := make([]string, 0, 3)
+	for _, name := range order {
+		cols := idx[name]
+		if len(cols) == 0 {
+			continue
+		}
+		out = append(out, name+"("+strings.Join(cols, ",")+")")
+		if len(out) >= 3 {
+			break
+		}
+	}
+	return out
+}
+
 func hasIndexFor(db *sql.DB, schema, t string, cols []string) (bool, string) {
 	if len(cols) == 0 {
 		return false, ""
@@ -1907,9 +1924,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					add(i, "ok", "被更新表", fmt.Sprintf("%s（单表更新）", r.table))
 					targetUse[r.table] = append(targetUse[r.table], stmtTarget{stmt: i, where: whereRaw(st)})
 					if n, ok := estimateByExplain(db, st, r.table, r.alias); ok {
-						tail := " · 未用索引（全表扫）"
+						tail := " · 全表扫（数据量小时优化器会这样选，不代表缺索引）"
 						if keys := explainIndexes(db, st); keys != "" {
 							tail = " · 索引 " + keys
+						} else if names := indexNamesOf(db, schema, r.table); len(names) > 0 {
+							tail = " · 全表扫（表上有 " + strings.Join(names, "、") + "，数据少时可能不走）"
 						}
 						add(i, "ok", "预计影响行数", fmt.Sprintf("预计更新 %d 行（按执行计划估算）%s", n, tail))
 					} else {
@@ -1958,11 +1977,20 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 			}
 
+			targetTable := ""
+			for _, ref := range refs {
+				if updated[strings.ToLower(ref.alias)] {
+					targetTable = ref.table
+					break
+				}
+			}
 			tEst := time.Now()
 			if n, note, idx, ok := estimateUpdate(db, schema, st); ok {
-				tail := " · 未用索引（全表扫）"
+				tail := " · 全表扫（数据量小时优化器会这样选，不代表缺索引）"
 				if idx != "" {
 					tail = " · 索引 " + idx
+				} else if names := indexNamesOf(db, schema, targetTable); len(names) > 0 {
+					tail = " · 全表扫（表上有 " + strings.Join(names, "、") + "，数据少时可能不走）"
 				}
 				switch note {
 				case "cap":

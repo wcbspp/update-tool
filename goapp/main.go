@@ -619,7 +619,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.0.6"
+const appVersion = "1.0.8"
 
 var runMu sync.Mutex
 
@@ -2393,6 +2393,18 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && p == "/api/health":
 		writeJSON(w, 200, map[string]any{"ok": true, "version": appVersion, "build": buildTime, "pid": os.Getpid()})
 
+	case r.Method == http.MethodPost && p == "/api/shutdown":
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if host != "127.0.0.1" && host != "::1" {
+			writeJSON(w, 403, map[string]any{"ok": false, "error": "只允许本机调用"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			os.Exit(0)
+		}()
+
 	case r.Method == http.MethodGet && p == "/api/update/check":
 		mu.Lock()
 		st := loadStore()
@@ -3221,6 +3233,47 @@ func makeRelease(args []string) {
 	fmt.Printf("已生成 %s/version.json（%s，%s）\n", *dir, *ver, *build)
 }
 
+// 端口上是否已有本程序在跑；返回它对外的版本号
+func runningVersion(port string) (string, bool) {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get("http://127.0.0.1:" + port + "/api/health")
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	var h struct {
+		Version string `json:"version"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&h) != nil {
+		return "", false
+	}
+	return h.Version, true
+}
+
+// ensureInstance：返回 true 表示应当由本进程提供服务
+func ensureInstance(port string) bool {
+	ver, alive := runningVersion(port)
+	if !alive {
+		return true
+	}
+	if ver == appVersion {
+		fmt.Printf("  已有同版本实例在运行（v%s），直接打开浏览器\n", ver)
+		return false
+	}
+	fmt.Printf("  检测到旧版本 v%s 正在运行，正在让它退出…\n", ver)
+	c := &http.Client{Timeout: 3 * time.Second}
+	if resp, err := c.Post("http://127.0.0.1:"+port+"/api/shutdown", "application/json", nil); err == nil {
+		resp.Body.Close()
+	}
+	for i := 0; i < 60; i++ {
+		if _, still := runningVersion(port); !still {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return true
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "-mkrelease" {
 		makeRelease(os.Args[2:])
@@ -3275,6 +3328,10 @@ func main() {
 	}
 	fmt.Printf("  数据   %s\n\n", dataFile)
 
+	if !ensureInstance(port) {
+		openBrowser("http://127.0.0.1:" + port + "/")
+		return
+	}
 	openBrowser("http://127.0.0.1:" + port + "/")
 	srv := &http.Server{
 		Addr:              addr,

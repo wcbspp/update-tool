@@ -8,8 +8,8 @@ export CGO_ENABLED=0
 BT=$(date +%Y%m%d-%H%M%S)
 FLAGS=(-trimpath -ldflags "-s -w -X main.buildTime=$BT")
 
-echo "→ windows/amd64"
-GOOS=windows GOARCH=amd64 go build "${FLAGS[@]}" -o ../release-win/medupdate.exe .
+echo "→ windows/amd64（无控制台窗口）"
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H windowsgui -X main.buildTime=$BT" -o ../release-win/medupdate.exe .
 
 echo "→ darwin/arm64"
 GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../release-mac/medupdate .

@@ -1943,7 +1943,18 @@ async function openUpdate() {
       ${f ? `<button class="primary" id="uGo">下载 ${isMac ? 'macOS' : 'Windows'} 版</button>` : ''}</div>`;
   $('mask').classList.add('on');
   $('uCancel').onclick = () => $('mask').classList.remove('on');
-  if (f) $('uGo').onclick = () => window.open(r.base + f.url, '_blank');
+  if (f) $('uGo').onclick = () => {
+    const url = r.base + f.url;
+    // 用临时 a 触发下载：不导航当前页，也不会被弹窗拦截
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    $('mask').classList.remove('on');
+    toast('已开始下载：解压覆盖原程序后重新打开即可', 'ok');
+  };
 }
 
 function bindStmtJump() {

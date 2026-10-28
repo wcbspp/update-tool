@@ -582,6 +582,8 @@
   .dbchip{font:11.5px ui-monospace,Menlo,monospace;color:#bcd0e8;background:#131b26;
     border:1px solid #2f3d52;border-radius:5px;padding:2px 8px;cursor:pointer;transition:.12s}
   .dbchip:hover{background:#1a2a3d;border-color:#4d7fbf;color:#fff}
+  .updHow{margin-top:12px;padding:9px 11px;border-radius:6px;background:#0f1724;
+    border:1px solid #24334a;font-size:11.5px;color:#a9b9cf;line-height:1.7}
 </style>
 </head>
 <body>
@@ -1915,11 +1917,15 @@ async function openUpdate() {
 
   const head = r ? `发现新版本 ${esc(r.latest || '')}` : '关于';
   const body = r
-    ? `<div style="font-size:12.5px;color:#c2cfe1;line-height:1.9;margin-top:6px">
-         当前版本：${esc(r.current || APP_VERSION)}<br>
-         最新版本：<b style="color:#7fb2ff">${esc(r.latest || '')}</b><br>
-         更新说明：${esc(r.notes || '—')}
-       </div>`
+    ? `<div style="font-size:12.5px;color:#c2cfe1;line-height:1.95;margin-top:6px">
+         <span style="color:#9fb0c6">版本</span>
+         <b style="color:#e8eef7">${esc(r.current || APP_VERSION)}</b>
+         <span style="color:#5f6d80">→</span>
+         <b style="color:#7fb2ff">${esc(r.latest || '')}</b><br>
+         <span style="color:#9fb0c6">更新说明</span>　${esc(r.notes || '—')}
+       </div>
+       <div class="updHow">下载后：解压覆盖原来的程序文件，重新打开即可生效；
+         <b>data.json 配置不受影响</b>，不用重新连接数据库。</div>`
     : `<div style="font-size:12.5px;color:#c2cfe1;line-height:1.9;margin-top:6px">
          当前版本：<b style="color:#7fb2ff">${esc(APP_VERSION || '—')}</b><br>
          已是最新版本。
@@ -1937,7 +1943,18 @@ async function openUpdate() {
       ${f ? `<button class="primary" id="uGo">下载 ${isMac ? 'macOS' : 'Windows'} 版</button>` : ''}</div>`;
   $('mask').classList.add('on');
   $('uCancel').onclick = () => $('mask').classList.remove('on');
-  if (f) $('uGo').onclick = () => window.open(r.base + f.url, '_blank');
+  if (f) $('uGo').onclick = () => {
+    const url = r.base + f.url;
+    // 用临时 a 触发下载：不导航当前页，也不会被弹窗拦截
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    $('mask').classList.remove('on');
+    toast('已开始下载：解压覆盖原程序后重新打开即可', 'ok');
+  };
 }
 
 function bindStmtJump() {

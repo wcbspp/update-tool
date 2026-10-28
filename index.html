@@ -578,6 +578,10 @@
   .kvRow{display:flex;gap:9px;align-items:baseline;margin-top:10px;font-size:11.5px;color:#8fa3bd}
   .kvRow .kvK{flex:none;color:#6f7d92}
   .kvRow .kvV{font:11.5px ui-monospace,Menlo,monospace;color:#a9c2e0;word-break:break-all;user-select:text}
+  .dblistBox{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+  .dbchip{font:11.5px ui-monospace,Menlo,monospace;color:#bcd0e8;background:#131b26;
+    border:1px solid #2f3d52;border-radius:5px;padding:2px 8px;cursor:pointer;transition:.12s}
+  .dbchip:hover{background:#1a2a3d;border-color:#4d7fbf;color:#fff}
 </style>
 </head>
 <body>
@@ -764,7 +768,8 @@ function dialog({ title, fields, okText = '保存', onDelete, extraLabel, onExtr
       if (f.type === 'db') {
         return `<label>${f.label}</label>
           <input id="f_${f.k}" list="dblist" value="${f.value == null ? '' : esc(f.value)}" placeholder="${f.placeholder || ''}" autocomplete="off">
-          <datalist id="dblist"></datalist>`;
+          <datalist id="dblist"></datalist>
+          <div class="dblistBox" id="dblistBox"></div>`;
       }
       if (f.type === 'select') {
         return `<label>${f.label}</label>
@@ -805,6 +810,22 @@ function dialog({ title, fields, okText = '保存', onDelete, extraLabel, onExtr
         box.style.color = r.ok ? 'var(--ok)' : 'var(--bad)';
         if (r.ok && r.databases && r.databases.length) {
           $('dblist').innerHTML = r.databases.map(d => `<option value="${esc(d)}"></option>`).join('');
+          const box = $('dblistBox');
+          if (box) {
+            box.innerHTML = r.databases.map(d =>
+              `<span class="dbchip" data-v="${esc(d)}">${esc(d)}</span>`).join('');
+            box.querySelectorAll('.dbchip').forEach(el => {
+              el.onclick = () => {
+                const inp = $('f_database');
+                if (inp) { inp.value = el.getAttribute('data-v'); inp.focus(); }
+              };
+            });
+          }
+          // 只有一个库时直接填好，省得再选
+          if (r.databases.length === 1) {
+            const inp = $('f_database');
+            if (inp && !inp.value) inp.value = r.databases[0];
+          }
         }
       } catch (e) { box.textContent = '✘ ' + e.message; box.style.color = 'var(--bad)'; }
     };

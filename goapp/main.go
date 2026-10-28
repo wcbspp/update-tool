@@ -2234,6 +2234,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			"medupdate-win-1.0.1.zip": "dist/medupdate-win-1.0.1.zip",
 			"medupdate-mac-1.0.1.zip": "dist/medupdate-mac-1.0.1.zip",
 			"medupdate-app.zip":       "dist/update-tool-mac-app.zip",
+			"medupdate-lan.zip":       "dist/medupdate-lan-1.0.4.zip",
 		}
 		name := strings.TrimPrefix(p, "/dl/")
 		rel, ok := files[name]

@@ -767,8 +767,7 @@ function dialog({ title, fields, okText = '保存', onDelete, extraLabel, onExtr
     const body = fields.map(f => {
       if (f.type === 'db') {
         return `<label>${f.label}</label>
-          <input id="f_${f.k}" list="dblist" value="${f.value == null ? '' : esc(f.value)}" placeholder="${f.placeholder || ''}" autocomplete="off">
-          <datalist id="dblist"></datalist>
+          <input id="f_${f.k}" value="${f.value == null ? '' : esc(f.value)}" placeholder="${f.placeholder || ''}" autocomplete="off">
           <div class="dblistBox" id="dblistBox"></div>`;
       }
       if (f.type === 'select') {
@@ -806,10 +805,9 @@ function dialog({ title, fields, okText = '保存', onDelete, extraLabel, onExtr
       box.textContent = '连接中…'; box.style.color = 'var(--dim)';
       try {
         const r = await onExtra(read());
-        box.textContent = (r.ok ? '✔ ' : '✘ ') + (r.ok ? r.output + (r.databases && r.databases.length ? `　·　共 ${r.databases.length} 个库，可在「库名」下拉选择` : '') : r.error);
+        box.textContent = (r.ok ? '✔ ' : '✘ ') + (r.ok ? r.output + (r.databases && r.databases.length ? `　·　共 ${r.databases.length} 个库，点下方库名选择` : '') : r.error);
         box.style.color = r.ok ? 'var(--ok)' : 'var(--bad)';
         if (r.ok && r.databases && r.databases.length) {
-          $('dblist').innerHTML = r.databases.map(d => `<option value="${esc(d)}"></option>`).join('');
           const box = $('dblistBox');
           if (box) {
             box.innerHTML = r.databases.map(d =>

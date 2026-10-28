@@ -973,13 +973,49 @@ func tableCount(db *sql.DB, t string) int64 {
 	return n
 }
 
-// 某列是否存在于表里
+// 某列是否存在于表里；information_schema 不可用时退回 SHOW COLUMNS
 func tableHasColumn(db *sql.DB, schema, table, col string) bool {
 	var n int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
+	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND UPPER(COLUMN_NAME)=UPPER(?)`,
-		schema, table, col).Scan(&n)
-	return n > 0
+		schema, table, col).Scan(&n); err == nil && n > 0 {
+		return true
+	}
+	rows, err := db.Query("SHOW COLUMNS FROM " + qualTable(schema, table) +
+		" LIKE '" + strings.ReplaceAll(col, "'", "''") + "'")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	return rows.Next()
+}
+
+// 表的列数；information_schema 不可用时退回 SHOW COLUMNS 计数
+func tableColumnCount(db *sql.DB, schema, table string) int {
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)`,
+		schema, table).Scan(&n); err == nil && n > 0 {
+		return n
+	}
+	rows, err := db.Query("SHOW COLUMNS FROM " + qualTable(schema, table))
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	c := 0
+	for rows.Next() {
+		c++
+	}
+	return c
+}
+
+// 表名限定：schema.table
+func qualTable(schema, table string) string {
+	if schema == "" {
+		return quoteIdent(table)
+	}
+	return quoteIdent(schema) + "." + quoteIdent(table)
 }
 
 // 列是否允许 NULL
@@ -988,16 +1024,45 @@ func colNullable(db *sql.DB, schema, table, col string) (bool, bool) {
 	err := db.QueryRow(`SELECT IS_NULLABLE FROM information_schema.COLUMNS
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND UPPER(COLUMN_NAME)=UPPER(?)`,
 		schema, table, col).Scan(&v)
-	if err != nil {
+	if err == nil {
+		return strings.EqualFold(v, "YES"), true
+	}
+	// 兜底：SHOW COLUMNS 的 Null 列
+	rows, e := db.Query("SHOW COLUMNS FROM " + qualTable(schema, table) +
+		" LIKE '" + strings.ReplaceAll(col, "'", "''") + "'")
+	if e != nil {
 		return false, false
 	}
-	return strings.EqualFold(v, "YES"), true
+	defer rows.Close()
+	cols, e := rows.Columns()
+	if e != nil || !rows.Next() {
+		return false, false
+	}
+	vals := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if rows.Scan(ptrs...) != nil {
+		return false, false
+	}
+	for i, c := range cols {
+		if strings.EqualFold(c, "Null") {
+			var b []byte
+			switch t := vals[i].(type) {
+			case []byte:
+				b = t
+			case string:
+				b = []byte(t)
+			}
+			return strings.EqualFold(string(b), "YES"), true
+		}
+	}
+	return false, false
 }
 
 func columnCount(db *sql.DB, schema, t string) int {
-	var n int
-	_ = db.QueryRow("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)", schema, t).Scan(&n)
-	return n
+	return tableColumnCount(db, schema, t)
 }
 
 // 唯一键：优先主键；没有主键就用“所有列都 NOT NULL”的唯一索引（唯一索引允许多个 NULL，不能用来判重）
@@ -1007,7 +1072,8 @@ func keyCols(db *sql.DB, schema, t string) ([]string, string) {
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND NON_UNIQUE=0
 		ORDER BY (INDEX_NAME='PRIMARY') DESC, INDEX_NAME, SEQ_IN_INDEX`, schema, t)
 	if err != nil {
-		return nil, ""
+		// 华为 DRDS 等中间件可能不支持这类查询，直接走 SHOW INDEX
+		return keyColsViaShowIndex(db, schema, t)
 	}
 	defer rows.Close()
 
@@ -1313,10 +1379,7 @@ func versionReport(db *sql.DB, schema string, tables []string, col string, pfxs 
 
 	for _, rawT := range tables {
 		t := resolveTable(db, schema, rawT)
-		var n int
-		_ = db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
-			WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND UPPER(COLUMN_NAME)=UPPER(?)`, schema, t, col).Scan(&n)
-		if n == 0 {
+		if !tableHasColumn(db, schema, t, col) {
 			out = append(out, map[string]any{"table": t, "field": col, "missing": true})
 			continue
 		}
@@ -2657,7 +2720,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var ver, curDB string
-		_ = db.QueryRow("SELECT VERSION(), IFNULL(DATABASE(),'(未选择库)')").Scan(&ver, &curDB)
+		if err := db.QueryRow("SELECT VERSION()").Scan(&ver); err != nil || ver == "" {
+			ver = "未知版本"
+		}
+		if err := db.QueryRow("SELECT DATABASE()").Scan(&curDB); err != nil || curDB == "" {
+			curDB = "(未选择库)"
+		}
 		rows, err := db.Query("SHOW DATABASES")
 		dbs := []string{}
 		if err == nil {
@@ -3001,6 +3069,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			checks = append(validateText(text), checks...)
 		}
 		if err != nil {
+			// 预检失败（超时、连不上）也留一条记录，便于事后排查
+			errShort := err.Error()
+			if len([]rune(errShort)) > 600 {
+				errShort = string([]rune(errShort)[:600])
+			}
+			appendLog(map[string]any{
+				"ts": time.Now().Format(time.RFC3339), "type": "preflight",
+				"script": sc.Name, "ds": ds.Name, "database": ds.Database,
+				"dryRun": false, "stmts": len(stmts), "ok": false,
+				"ms": time.Since(pfStart).Milliseconds(), "failedAt": -1, "error": errShort,
+			})
 			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error(), "checks": []map[string]any{}, "versions": []map[string]any{}})
 			return
 		}

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>404</title>
+<style>
+  :root{--bg:#05070b;--fg:#e8eef7;--dim:#5c6b80;--acc:#7fb2ff}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:radial-gradient(circle at 50% 40%,#0b1220 0%,var(--bg) 60%);
+    color:var(--fg);display:flex;flex-direction:column;align-items:center;justify-content:center;
+    font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;user-select:none}
+  .stage{position:relative;width:220px;height:180px;display:flex;align-items:flex-end;justify-content:center}
+  .cow{font-size:104px;line-height:1;transform-origin:50% 90%;animation:dance 1.1s ease-in-out infinite;cursor:pointer;
+    filter:drop-shadow(0 12px 18px rgba(0,0,0,.55))}
+  .cow.fast{animation-duration:.42s}
+  .shadow{position:absolute;bottom:6px;width:120px;height:14px;border-radius:50%;
+    background:radial-gradient(ellipse,rgba(0,0,0,.55),transparent 70%);animation:shrink 1.1s ease-in-out infinite}
+  @keyframes dance{
+    0%   {transform:translateY(0) rotate(-7deg) scale(1)}
+    25%  {transform:translateY(-16px) rotate(0deg) scale(1.04)}
+    50%  {transform:translateY(0) rotate(7deg) scale(1)}
+    75%  {transform:translateY(-10px) rotate(0deg) scale(1.02)}
+    100% {transform:translateY(0) rotate(-7deg) scale(1)}
+  }
+  @keyframes shrink{
+    0%,100%{transform:scale(1);opacity:.55}
+    50%{transform:scale(.72);opacity:.3}
+  }
+  .t1{margin-top:26px;font-size:15px;color:var(--fg);letter-spacing:.02em}
+  .t2{margin-top:6px;font-size:12.5px;color:var(--dim)}
+  .code{position:fixed;bottom:22px;font:11px ui-monospace,Menlo,monospace;color:#33404f;letter-spacing:.18em}
+  .hint{position:fixed;bottom:44px;font-size:11px;color:#2b3644}
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="shadow"></div>
+    <div class="cow" id="cow" title="点我">🐄</div>
+  </div>
+  <div class="t1">这里没有目录，只有一头在跳舞的牛马</div>
+  <div class="t2">换条路走吧，打工人</div>
+  <div class="hint">（点一下牛马，它会更卖力）</div>
+  <div class="code">404 NOT FOUND</div>
+<script>
+  document.getElementById('cow').addEventListener('click', function () {
+    this.classList.toggle('fast');
+  });
+</script>
+</body>
+</html>

@@ -3186,8 +3186,14 @@ func makeRelease(args []string) {
 	files := map[string]any{}
 	sums := make([]string, 0, 2)
 	for _, osname := range []string{"win", "mac"} {
-		name := fmt.Sprintf("medupdate-%s-%s.zip", osname, *ver)
-		p := filepath.Join(*dir, name)
+		// 支持随机后缀：medupdate-win-1.0.5-a8f3c2.zip
+		matches, _ := filepath.Glob(filepath.Join(*dir, fmt.Sprintf("medupdate-%s-*.zip", osname)))
+		if len(matches) != 1 {
+			fmt.Fprintf(os.Stderr, "%s 目录下应当正好有一个 medupdate-%s-*.zip，实际 %d 个\n", *dir, osname, len(matches))
+			os.Exit(2)
+		}
+		p := matches[0]
+		name := filepath.Base(p)
 		b, err := os.ReadFile(p)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "读不到 %s：%v\n", p, err)

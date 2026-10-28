@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -618,6 +619,27 @@ func preview(s string) string {
 
 /* ---------------- 数据库 ---------------- */
 
+// sessInitConnector：每条新连接建好后设置 SELECT 超时（5.7.8 以下/代理不支持时忽略错误）
+type sessInitConnector struct {
+	base driver.Connector
+	ms   int
+}
+
+func (c sessInitConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.base.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if c.ms > 0 {
+		if ex, ok := conn.(driver.ExecerContext); ok {
+			_, _ = ex.ExecContext(ctx, fmt.Sprintf("SET SESSION max_execution_time = %d", c.ms), nil)
+		}
+	}
+	return conn, nil
+}
+
+func (c sessInitConnector) Driver() driver.Driver { return c.base.Driver() }
+
 func openDB(ds DataSource) (*sql.DB, error) {
 	cfg := mysql.NewConfig()
 	cfg.User = ds.User
@@ -635,16 +657,14 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	cfg.ReadTimeout = time.Duration(dsIOSec(ds)) * time.Second
 	cfg.WriteTimeout = time.Duration(dsIOSec(ds)) * time.Second
 
-	db, err := sql.Open("mysql", cfg.FormatDSN())
+	// max_execution_time 是会话级设置：连接被丢弃后重新建连必须重设。
+	// 用连接器在每次建连时执行，避免“超时一次之后就没保护了”。
+	base, err := mysql.NewConnector(cfg)
 	if err != nil {
 		return nil, err
 	}
+	db := sql.OpenDB(sessInitConnector{base: base, ms: dsDQLSec(ds) * 1000})
 	db.SetMaxOpenConns(1)
-	// SELECT 超时由服务器中断（只影响 SELECT，不影响 DML）；执行事务时会被改成 0
-	if _, err := db.Exec(fmt.Sprintf("SET SESSION max_execution_time = %d", dsDQLSec(ds)*1000)); err != nil {
-		// 5.7.8 以下或代理不支持，忽略
-		_ = err
-	}
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, err
@@ -809,8 +829,11 @@ var (
 	reFrom   = regexp.MustCompile(`(?is)\bfrom\s+[\x60"]?([\w$.]+)[\x60"]?`)
 	reUpdate = regexp.MustCompile(`(?is)^\s*update\s+(.+?)\s+set\s+(.+)$`)
 	reDelete = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)`)
-	reIdent  = regexp.MustCompile(`^[\x60"]?([\w$.]+)[\x60"]?`)
-	reBatch  = regexp.MustCompile(`(?i)([A-Za-z0-9_]+)_update_([A-Za-z0-9]+)`)
+	// DELETE t1, t2 FROM ... 与 DELETE FROM t USING ...
+	reDeleteMulti = regexp.MustCompile(`(?is)^\s*delete\s+(.+?)\s+from\s+`)
+	reDeleteUsing = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)[\x60"]?\s+using\s+`)
+	reIdent       = regexp.MustCompile(`^[\x60"]?([\w$.]+)[\x60"]?`)
+	reBatch       = regexp.MustCompile(`(?i)([A-Za-z0-9_]+)_update_([A-Za-z0-9]+)`)
 )
 
 // 5.6 / Linux 下表名区分大小写，先按不区分大小写解析出真实表名
@@ -1669,7 +1692,7 @@ func conflictCountCapped(db *sql.DB, target, src string, pk []string, capN, pfSe
 }
 
 // 每张批次表的版本号：期望前缀的值 + 不该出现的值（标红用）
-func versionReport(db *sql.DB, schema string, tables []string, col string, pfxs []string) []map[string]any {
+func versionReport(db *sql.DB, schema string, tables []string, col string, pfxs []string, pfSec int) []map[string]any {
 	out := make([]map[string]any, 0, len(tables))
 
 	for _, rawT := range tables {
@@ -1680,12 +1703,19 @@ func versionReport(db *sql.DB, schema string, tables []string, col string, pfxs 
 		}
 
 		if len(pfxs) == 0 {
-			// 没配前缀：列出表里实际出现的值，并说明是“没配”而不是“没数据”
-			vals := distinctVals(db, t, col, 21)
-			out = append(out, map[string]any{
+			// 没配前缀：列出表里实际出现的值；读失败要单独标出来，不能和“没有值”混在一起
+			vals, more, err := distinctVals(db, schema, t, col, 21, pfSec)
+			item := map[string]any{
 				"table": t, "field": col, "ok": vals, "other": []string{}, "missing": false,
 				"note": "未配置版本前缀，仅列出该字段现有值",
-			})
+			}
+			if err != nil {
+				item["err"] = "读取失败：" + err.Error()
+				item["ok"] = []string{}
+			} else if more {
+				item["note"] = "未配置版本前缀，仅显示前 21 个值（还有更多）"
+			}
+			out = append(out, item)
 			continue
 		}
 		conds := make([]string, 0, len(pfxs))
@@ -1696,8 +1726,10 @@ func versionReport(db *sql.DB, schema string, tables []string, col string, pfxs 
 
 		pick := func(where string, limit int) []string {
 			q := fmt.Sprintf("SELECT DISTINCT %s FROM %s WHERE %s AND %s IS NOT NULL LIMIT %d",
-				quoteIdent(col), quoteIdent(t), where, quoteIdent(col), limit)
-			rows, err := db.Query(q)
+				quoteIdent(col), qualTable(schema, t), where, quoteIdent(col), limit)
+			ctx, cancel := pfCtx(pfSec)
+			defer cancel()
+			rows, err := db.QueryContext(ctx, q)
 			if err != nil {
 				return nil
 			}
@@ -2248,6 +2280,15 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	}
 	targetUse := map[string][]stmtTarget{}
 
+	type delTask struct {
+		i     int
+		stmt  string
+		table string
+		where string
+		lim   int64
+	}
+	var delPending []delTask
+
 	batchTables := make([]string, 0)
 	seenTable := map[string]bool{}
 	for i, st := range stmts {
@@ -2559,43 +2600,99 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 
 		case stmtKind(st) == "delete":
-			m := reDelete.FindStringSubmatch(st)
-			if m == nil {
-				continue
-			}
-			target := mResolveTable(db, schema, normTable(m[1]))
-			add(i, "ok", "被删除表", target)
-			targetUse[target] = append(targetUse[target], stmtTarget{stmt: i, where: whereRaw(st)})
 			lim := deleteLimit(st)
-			if !reWhereWord.MatchString(st) {
+			where := whereRaw(st)
+
+			// 三种写法：单表、DELETE t FROM t JOIN ...、DELETE FROM t USING t JOIN ...
+			var targets []string
+			countTable := ""
+			multi := false
+			switch {
+			case reDeleteUsing.MatchString(st):
+				mm := reDeleteUsing.FindStringSubmatch(st)
+				targets = append(targets, mResolveTable(db, schema, normTable(mm[1])))
+				countTable = targets[0]
+				multi = true
+			case reDeleteMulti.MatchString(st):
+				mm := reDeleteMulti.FindStringSubmatch(st)
+				for _, part := range splitTopLevel(mm[1]) {
+					if t, _ := parseTableRef(part); t != "" {
+						targets = append(targets, mResolveTable(db, schema, t))
+					}
+				}
+				multi = true
+			default:
+				m := reDelete.FindStringSubmatch(st)
+				if m == nil {
+					continue
+				}
+				targets = append(targets, mResolveTable(db, schema, normTable(m[1])))
+				countTable = targets[0]
+			}
+
+			for _, tg := range targets {
+				add(i, "ok", "被删除表", tg)
+				targetUse[tg] = append(targetUse[tg], stmtTarget{stmt: i, where: where})
+			}
+			if multi {
+				add(i, "warn", "多表 DELETE", "按关联条件删除，行数受关联结果影响，预检不做精确统计，请自行确认范围")
+			}
+			if whereTail(st) == "" {
 				if lim > 0 {
 					add(i, "warn", "没有 WHERE 条件", fmt.Sprintf("这条 DELETE 没有 WHERE，按 LIMIT %d 最多删 %d 行，请确认不是笔误", lim, lim))
 				} else {
 					add(i, "warn", "没有 WHERE 条件", "这条 DELETE 会清空整张表，请确认不是笔误")
 				}
 			}
-			tDel := time.Now()
-			where := whereRaw(st)
-			if n, capped, err := countWhereBounded(db, qualTable(schema, target), where, 300000, pfSec); err == nil {
-				switch {
-				case lim > 0 && (capped || n <= lim):
-					// LIMIT 生效：实际删除量由它定
-					hit := lim
-					if !capped && n < lim {
-						hit = n
-					}
-					addD(i, "ok", "预计影响行数", fmt.Sprintf("预计删除 %d 行（LIMIT %d，精确计数）", hit, lim), time.Since(tDel))
-				case lim > 0:
-					addD(i, "warn", "预计影响行数", fmt.Sprintf("匹配 %d 行，本次只删 %d 行（LIMIT %d）", n, lim, lim), time.Since(tDel))
-				case capped:
-					addD(i, "warn", "预计影响行数", fmt.Sprintf("至少 %d 行（数到 30 万就停了，实际可能更多）", n), time.Since(tDel))
-				default:
-					addD(i, "ok", "预计影响行数", fmt.Sprintf("预计删除 %d 行（精确计数，最多数 30 万）", n), time.Since(tDel))
+			if countTable != "" {
+				delPending = append(delPending, delTask{i: i, stmt: st, table: countTable, where: where, lim: lim})
+			}
+		}
+	}
+
+	// DELETE 的行数统一并发跑，避免多条 DELETE 一条接一条等到超时
+	if len(delPending) > 0 {
+		type delRes struct {
+			n      int64
+			capped bool
+			err    error
+			dur    time.Duration
+		}
+		res := make([]delRes, len(delPending))
+		tasks := make([]func(*sql.DB), len(delPending))
+		for k := range delPending {
+			k := k
+			pp := delPending[k]
+			tasks[k] = func(c *sql.DB) {
+				t0 := time.Now()
+				res[k].n, res[k].capped, res[k].err = countWhereBounded(c, qualTable(schema, pp.table), pp.where, 300000, pfSec)
+				res[k].dur = time.Since(t0)
+			}
+		}
+		conns.parallel(db, tasks...)
+		for k, pp := range delPending {
+			r := res[k]
+			if r.err != nil {
+				if n, ok := estimateByExplain(db, pp.stmt, pp.table, ""); ok {
+					add(pp.i, "warn", "预计影响行数", fmt.Sprintf("约 %d 行（按执行计划估算，行数没数完）", n))
+				} else {
+					add(pp.i, "warn", "预计影响行数未计算", "查询超时或语句太复杂（大表上常见），不影响执行")
 				}
-			} else if n, ok := estimateByExplain(db, st, target, ""); ok {
-				add(i, "warn", "预计影响行数", fmt.Sprintf("约 %d 行（按执行计划估算，行数没数完）", n))
-			} else {
-				add(i, "warn", "预计影响行数未计算", "查询超时或语句太复杂（大表上常见），不影响执行")
+				continue
+			}
+			switch {
+			case pp.lim > 0 && (r.capped || r.n <= pp.lim):
+				hit := pp.lim
+				if !r.capped && r.n < pp.lim {
+					hit = r.n
+				}
+				addD(pp.i, "ok", "预计影响行数", fmt.Sprintf("预计删除 %d 行（LIMIT %d，精确计数）", hit, pp.lim), r.dur)
+			case pp.lim > 0:
+				addD(pp.i, "warn", "预计影响行数", fmt.Sprintf("匹配 %d 行，本次只删 %d 行（LIMIT %d）", r.n, pp.lim, pp.lim), r.dur)
+			case r.capped:
+				addD(pp.i, "warn", "预计影响行数", fmt.Sprintf("至少 %d 行（数到 30 万就停了，实际可能更多）", r.n), r.dur)
+			default:
+				addD(pp.i, "ok", "预计影响行数", fmt.Sprintf("预计删除 %d 行（精确计数，最多数 30 万）", r.n), r.dur)
 			}
 		}
 	}
@@ -2635,11 +2732,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		defer vwg.Done()
 		c := conns.take()
 		if c == nil {
-			versions = versionReport(db, schema, batchTables, verColName, verPfxs)
+			versions = versionReport(db, schema, batchTables, verColName, verPfxs, pfSec)
 			return
 		}
 		defer conns.give(c)
-		versions = versionReport(c, schema, batchTables, verColName, verPfxs)
+		versions = versionReport(c, schema, batchTables, verColName, verPfxs, pfSec)
 	}()
 	out = append(out, trxWarnings(db, schema, pfSec)...)
 	vwg.Wait()
@@ -4134,15 +4231,21 @@ func lanIPs() []string {
 	return out
 }
 
-// distinctVals：某列的前 n 个不同值（非空）
-func distinctVals(db *sql.DB, table, col string, limit int) []string {
-	rows, err := db.Query(fmt.Sprintf("SELECT DISTINCT %s FROM %s WHERE %s IS NOT NULL LIMIT %d",
-		quoteIdent(col), quoteIdent(table), quoteIdent(col), limit))
+// distinctVals：某列的前 limit 个不同值（非空）。多取一条用来判断“还有更多”。
+func distinctVals(db *sql.DB, schema, table, col string, limit, pfSec int) ([]string, bool, error) {
+	ctx, cancel := pfCtx(pfSec)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT DISTINCT %s FROM %s WHERE %s IS NOT NULL LIMIT %d",
+		quoteIdent(col), qualTable(schema, table), quoteIdent(col), limit+1))
 	if err != nil {
-		return nil
+		return nil, false, err
 	}
 	defer rows.Close()
-	return scanVals(rows)
+	vals := scanVals(rows)
+	if len(vals) > limit {
+		return vals[:limit], true, nil
+	}
+	return vals, false, nil
 }
 
 func scanVals(rows *sql.Rows) []string {

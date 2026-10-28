@@ -1487,6 +1487,10 @@ function versionsHTML(versions) {
       h += `<div class="vrow"><span class="vt">${esc(v.table)}</span><span class="vt">无 ${esc(v.field)} 字段</span></div>`;
       continue;
     }
+    if (v.err) {
+      h += `<div class="vrow"><span class="vt">${esc(v.table)}</span><span class="vt" style="color:#ff9a9a">${esc(v.err)}</span></div>`;
+      continue;
+    }
     if (v.note) {
       h += `<div class="vrow"><span class="vt">${esc(v.table)}</span><span class="vt">${esc(v.note)}</span></div>`;
     }

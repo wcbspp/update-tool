@@ -976,7 +976,7 @@ func tableCount(db *sql.DB, t string) int64 {
 // 某列是否存在于表里；information_schema 不可用时退回 SHOW COLUMNS
 func tableHasColumn(db *sql.DB, schema, table, col string) bool {
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
+	if err := infQueryRow(db, `SELECT COUNT(*) FROM information_schema.COLUMNS
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND UPPER(COLUMN_NAME)=UPPER(?)`,
 		schema, table, col).Scan(&n); err == nil && n > 0 {
 		return true
@@ -993,7 +993,7 @@ func tableHasColumn(db *sql.DB, schema, table, col string) bool {
 // 表的列数；information_schema 不可用时退回 SHOW COLUMNS 计数
 func tableColumnCount(db *sql.DB, schema, table string) int {
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
+	if err := infQueryRow(db, `SELECT COUNT(*) FROM information_schema.COLUMNS
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)`,
 		schema, table).Scan(&n); err == nil && n > 0 {
 		return n
@@ -1021,7 +1021,7 @@ func qualTable(schema, table string) string {
 // 列是否允许 NULL
 func colNullable(db *sql.DB, schema, table, col string) (bool, bool) {
 	var v string
-	err := db.QueryRow(`SELECT IS_NULLABLE FROM information_schema.COLUMNS
+	err := infQueryRow(db, `SELECT IS_NULLABLE FROM information_schema.COLUMNS
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND UPPER(COLUMN_NAME)=UPPER(?)`,
 		schema, table, col).Scan(&v)
 	if err == nil {
@@ -1066,8 +1066,16 @@ func columnCount(db *sql.DB, schema, t string) int {
 }
 
 // 唯一键：优先主键；没有主键就用“所有列都 NOT NULL”的唯一索引（唯一索引允许多个 NULL，不能用来判重）
+// 元数据查询入口，测试里可替换以模拟「中间件限制 information_schema」
+var infQuery = func(db *sql.DB, q string, args ...any) (*sql.Rows, error) {
+	return db.Query(q, args...)
+}
+var infQueryRow = func(db *sql.DB, q string, args ...any) *sql.Row {
+	return db.QueryRow(q, args...)
+}
+
 func keyCols(db *sql.DB, schema, t string) ([]string, string) {
-	rows, err := db.Query(`SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX
+	rows, err := infQuery(db, `SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX
 		FROM information_schema.STATISTICS
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND NON_UNIQUE=0
 		ORDER BY (INDEX_NAME='PRIMARY') DESC, INDEX_NAME, SEQ_IN_INDEX`, schema, t)

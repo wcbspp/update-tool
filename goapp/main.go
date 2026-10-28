@@ -3186,7 +3186,7 @@ func makeRelease(args []string) {
 	files := map[string]any{}
 	sums := make([]string, 0, 2)
 	for _, osname := range []string{"win", "mac"} {
-		name := fmt.Sprintf("medupdate-%s-%s.bin", osname, *ver)
+		name := fmt.Sprintf("medupdate-%s-%s.zip", osname, *ver)
 		p := filepath.Join(*dir, name)
 		b, err := os.ReadFile(p)
 		if err != nil {

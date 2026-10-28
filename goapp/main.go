@@ -1120,6 +1120,10 @@ func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
 
 var reJoinWord = regexp.MustCompile(`(?is)\b(join|straight_join)\b`)
 
+// 连接条件里出现函数（CONCAT 等）时，分片中间件无法把条件下推，
+// 会退化成 NestedLoopJoin(condition=true) 的笛卡尔积——这条估算没有意义，也不该等它。
+var reExprJoin = regexp.MustCompile(`(?is)(concat|ifnull|coalesce|date_format|date_sub|date_add|substr|substring|left|right|trim|lower|upper)\s*\(`)
+
 // approxRows：表行数的近似值（information_schema，不扫表）
 func approxRows(db *sql.DB, schema, table string) (int64, bool) {
 	var n int64
@@ -2168,6 +2172,7 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, st
 	}
 
 	where := whereRaw(st)
+	risky := reExprJoin.MatchString(where)
 
 	// 先做有界精确计数：最多数到 30 万行就停，不会因为表大而拖死。
 	// 连接顺序按表大小排好并加 STRAIGHT_JOIN，避免大表驱动导致全表扫描。
@@ -2181,7 +2186,11 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, st
 	}
 	q += fmt.Sprintf(" LIMIT %d) x", capN+1)
 	var n int64
-	ctx, cancel := pfCtx(pfSec)
+	budget := pfSec
+	if risky && (budget <= 0 || budget > 3) {
+		budget = 3 // 函数连接条件：给 3 秒试一下，不行就明说数不出来
+	}
+	ctx, cancel := pfCtx(budget)
 	defer cancel()
 	if err := db.QueryRowContext(ctx, q).Scan(&n); err == nil {
 		if n > capN {
@@ -2190,6 +2199,10 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, st
 		return n, "", explainIndexes(db, q), true
 	}
 
+	if risky {
+		// 计划多半是笛卡尔积，EXPLAIN 的数字也没意义，直接说明
+		return 0, "join_expr", "", true
+	}
 	// 数不出来（超时/太复杂）→ 用执行计划给个量级
 	if n2, ok := estimateByExplain(db, st, table, alias); ok {
 		return n2, "explain", "", true
@@ -2726,6 +2739,8 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					tail = " · 全表扫（表上有 " + strings.Join(names, "、") + "，数据少时可能不走）"
 				}
 				switch estNote {
+				case "join_expr":
+					addD(i, "warn", "预计影响行数未计算", "连接条件里有函数（CONCAT 之类），分片中间件无法下推，会退化成笛卡尔积；预检不再硬数，执行前请自行确认范围", estDur)
 				case "cap":
 					addD(i, "warn", "预计影响行数", fmt.Sprintf("≥ %d 行（数到 30 万就停了，实际可能更多）%s", estN, tail), estDur)
 				case "explain":

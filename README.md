@@ -166,6 +166,10 @@ MYSQL_PERF_ROWS=10000000 go test -run TestPerfScenarios -v -timeout 50m
 
 ---
 
+## 项目手记
+
+改代码前先看 [`docs/PROJECT.md`](docs/PROJECT.md)：里面记了架构决策、预检语义、发版流程、服务器部署细节，以及**踩过的坑**（缩放、datalist、WAF、缓存、单实例接管等）。新会话接手时按那份文档走，别从头猜。
+
 ## 已知限制
 
 - 预检的行数统计上限 30 万行，超过显示 `≥ 300000`

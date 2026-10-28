@@ -584,6 +584,23 @@
   .dbchip:hover{background:#1a2a3d;border-color:#4d7fbf;color:#fff}
   .updHow{margin-top:12px;padding:9px 11px;border-radius:6px;background:#0f1724;
     border:1px solid #24334a;font-size:11.5px;color:#a9b9cf;line-height:1.7}
+  .hb{width:7px;height:7px;border-radius:50%;flex:none;display:inline-block;margin-right:6px;
+    background:#3fb950;animation:hbp 2.2s ease-out infinite}
+  .hb.bad{background:#f0616d;animation:none}
+  @keyframes hbp{0%{box-shadow:0 0 0 0 rgba(63,185,80,.45)}70%{box-shadow:0 0 0 6px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
+  .keys{opacity:.72;font-size:11px}
+  .radioRow{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+  .radioOpt{display:flex;align-items:baseline;gap:8px;padding:7px 10px;border:1px solid #24334a;
+    border-radius:7px;background:#0f1724;cursor:pointer;font-size:12.5px;color:#d6e2f2}
+  .radioOpt em{font-style:normal;color:#8b9bb0;font-size:11.5px}
+  .radioOpt input{width:auto;margin:0}
+  .hintBox{margin-top:8px;padding:8px 10px;border-radius:6px;border:1px solid #3a2d1c;
+    background:#1e1810;color:#d9b183;font-size:11.5px;line-height:1.7}
+  .exitNote{position:fixed;inset:0;background:#05070bf2;z-index:90;display:flex;align-items:center;justify-content:center}
+  .exitBox{text-align:center}
+  .exitIco{font-size:34px;color:#8b9bb0;margin-bottom:10px}
+  .exitT{font-size:17px;color:#f2f6fd;font-weight:600}
+  .exitD{margin-top:8px;font-size:12.5px;color:#a6b6cc}
 </style>
 </head>
 <body>
@@ -597,7 +614,7 @@
   <button class="sm accent" onclick="window.open('/guide','_blank')">使用说明</button>
   <button class="sm" onclick="openSettings()">设置</button>
   <button class="sm" onclick="openLogs()">执行日志</button>
-  <span class="who">⌘/Ctrl+Enter 预检 · ⌘/Ctrl+Shift+Enter 执行 · ⌘/Ctrl+S 保存</span>
+  <span class="who keys" title="⌘/Ctrl+Enter 预检　⌘/Ctrl+Shift+Enter 执行　⌘/Ctrl+S 保存">⌘↵ 预检 · ⌘⇧↵ 执行 · ⌘S 保存</span>
 </header>
 
 <main>
@@ -939,8 +956,10 @@ function healthTip() {
 
 function updateHealth() {
   var h = overallHealth();
-  var label = DS.length + ' 个连接 · ' + Object.keys(IDX.s).length + ' 个脚本';
-  $('who').innerHTML = '<span class="dot ' + h + '"></span>' + label;
+  var scope = LISTEN_MODE === 'all' ? '局域网' : '本机';
+  var label = scope + ' · ' + DS.length + ' 个连接 · ' + Object.keys(IDX.s).length + ' 个脚本';
+  $('who').innerHTML = '<span class="hb ' + (h === 'fail' ? 'bad' : 'ok') + '"></span>' + label;
+  $('who').title = (LISTEN_MODE === 'all' ? '当前允许局域网访问' : '当前仅本机可访问') + '\n' + healthTip();
   $('who').title = healthTip();
 }
 
@@ -1888,6 +1907,7 @@ function safeRender(fn) {
 const REPO_URL = 'https://github.com/wcbspp/medupdate-tool';
 let UPDATE_INFO = null;
 let UPDATE_BASE = '';
+let LISTEN_MODE = 'local';
 let APP_VERSION = '';
 
 async function checkUpdate(fresh) {
@@ -1959,6 +1979,18 @@ async function openUpdate() {
   };
 }
 
+function showExitNote(title, desc) {
+  const old = document.getElementById('exitNote');
+  if (old) old.remove();
+  const d = document.createElement('div');
+  d.id = 'exitNote';
+  d.className = 'exitNote';
+  d.innerHTML = `<div class="exitBox"><div class="exitIco">⏻</div>
+    <div class="exitT">${esc(title)}</div>
+    <div class="exitD">${esc(desc)}</div></div>`;
+  document.body.appendChild(d);
+}
+
 function bindStmtJump() {
   $('res').querySelectorAll('[data-stmt]').forEach(el => {
     el.classList.add('jumpable');
@@ -1971,8 +2003,8 @@ function bindStmtJump() {
 
 
 async function openSettings() {
-  let on = PREFLIGHT_ON, up = '';
-  try { const r = await api('/api/settings'); on = !!r.preflight; up = r.updateUrl || ''; } catch (e) {}
+  let on = PREFLIGHT_ON, up = '', lm = 'local';
+  try { const r = await api('/api/settings'); on = !!r.preflight; up = r.updateUrl || ''; lm = r.listenMode || 'local'; } catch (e) {}
   const dlg = $('dlg');
   dlg.className = 'dlg';
   dlg.innerHTML = `<h3>设置</h3>
@@ -1988,9 +2020,19 @@ async function openSettings() {
     <div style="font-size:12px;color:#a9b8cc;line-height:1.9;margin-top:6px">
       填了之后启动时会读该地址下的 version.json 检查新版本；只读取清单，不改数据。
     </div>
+    <label>访问范围</label>
+    <div class="radioRow">
+      <label class="radioOpt"><input type="radio" name="setListen" value="local" ${lm !== 'all' ? 'checked' : ''}>
+        <span>仅本机</span><em>推荐，只有这台电脑能打开</em></label>
+      <label class="radioOpt"><input type="radio" name="setListen" value="all" ${lm === 'all' ? 'checked' : ''}>
+        <span>允许局域网访问</span><em>同网段任何人都能打开并执行脚本</em></label>
+    </div>
+    <div class="hintBox">本工具没有登录验证。开启局域网访问前，请确认网络环境可信。修改后程序会自动重启（约 2 秒）。</div>
     <div class="repoBox"><span class="repoLbl">仓库</span>
       <a href="${REPO_URL}" target="_blank" rel="noopener">${esc(REPO_URL.replace('https://github.com/', ''))} ↗</a></div>
-    <div class="foot"><span class="l"></span>
+    <div class="foot">
+      <button id="cExit" class="danger">退出程序</button>
+      <span class="l"></span>
       <button id="cCancel">关闭</button>
       <button class="primary" id="cOk">保存</button></div>`;
   $('mask').classList.add('on');
@@ -2000,12 +2042,29 @@ async function openSettings() {
   $('cOk').onclick = async () => {
     const val = $('setPf').checked;
     const url = ($('setUp') ? $('setUp').value : '').trim();
+    const pick = document.querySelector('input[name="setListen"]:checked');
+    const mode = pick ? pick.value : 'local';
     try {
-      await post('/api/settings', { preflight: val, updateUrl: url });
+      const r = await post('/api/settings', { preflight: val, updateUrl: url, listenMode: mode });
       PREFLIGHT_ON = val;
-      toast('已保存', 'ok');
+      if (r && r.needRestart) {
+        close();
+        showExitNote('正在重启…', '监听范围已修改，程序会在 2 秒后重新启动，页面会自动刷新。', false);
+        setTimeout(() => location.reload(), 3200);
+      } else {
+        toast('已保存', 'ok');
+        close();
+      }
     } catch (e) { toast(e.message, 'bad'); }
+  };
+
+  // 退出程序：二次确认
+  const ex = $('cExit');
+  if (ex) ex.onclick = async () => {
+    if (!confirm('退出后当前页面会断开，需要重新启动程序才能继续使用。确定退出？')) return;
+    try { await post('/api/shutdown', {}); } catch (e) {}
     close();
+    showExitNote('程序已退出', '可以关闭这个页面了。下次使用时重新打开 medupdate 即可。', true);
   };
   dlg.onkeydown = e => { if (e.key === 'Escape') close(); };
 }
@@ -2145,11 +2204,23 @@ function initResizer() {
     const gb = $('ghBtn');
     if (gb) gb.onclick = () => openUpdate();
     setTimeout(() => { try { checkUpdate(); } catch (e) {} }, 1200);
+    // 每 20 秒确认服务仍在响应，绿点据此闪烁/变红
+    setInterval(() => {
+      fetch('/api/health', { cache: 'no-store' }).then(r => r.json()).then(h => {
+        if (h && h.listenMode) LISTEN_MODE = h.listenMode;
+        updateHealth();
+      }).catch(() => {
+        const el = document.querySelector('#who .hb');
+        if (el) { el.className = 'hb bad'; }
+      });
+    }, 20000);
     fetch('/api/health').then(r => r.json()).then(h => {
       if (!h || !h.build) return;
       BOOTED_BUILD = h.build;
       const vtag = $('verTag');
       if (h.version) APP_VERSION = h.version;
+      if (h.listenMode) LISTEN_MODE = h.listenMode;
+      updateHealth();
       const vtxt = $('verText');
       if (vtxt && h.version) {
         vtxt.textContent = 'v' + h.version + ' · 创意 by 吴美丽';

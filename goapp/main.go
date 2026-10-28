@@ -140,10 +140,11 @@ type Script struct {
 }
 
 type Settings struct {
-	Preflight *bool  `json:"preflight"` // nil = 默认开启（供根级脚本/new 文件夹使用）
-	VerCol    string `json:"versionCol"`
-	VerPfxs   string `json:"versionPrefixes"`
-	UpdateURL string `json:"updateUrl"` // 升级源地址，例如 https://example.com/medupdate-xxx/
+	Preflight  *bool  `json:"preflight"` // nil = 默认开启（供根级脚本/new 文件夹使用）
+	VerCol     string `json:"versionCol"`
+	VerPfxs    string `json:"versionPrefixes"`
+	UpdateURL  string `json:"updateUrl"`  // 升级源地址
+	ListenMode string `json:"listenMode"` // local（默认，仅本机）| all（局域网）
 }
 
 type Store struct {
@@ -619,7 +620,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.0.10"
+const appVersion = "1.0.11"
 
 var runMu sync.Mutex
 
@@ -2281,12 +2282,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		st := loadStore()
 		mu.Unlock()
-		writeJSON(w, 200, map[string]any{"preflight": preflightEnabled(st), "updateUrl": st.Settings.UpdateURL})
+		lm := st.Settings.ListenMode
+		if lm == "" {
+			lm = "local"
+		}
+		writeJSON(w, 200, map[string]any{"preflight": preflightEnabled(st), "updateUrl": st.Settings.UpdateURL, "listenMode": lm})
 
 	case r.Method == http.MethodPost && p == "/api/settings":
 		var b struct {
-			Preflight *bool   `json:"preflight"`
-			UpdateURL *string `json:"updateUrl"`
+			Preflight  *bool   `json:"preflight"`
+			UpdateURL  *string `json:"updateUrl"`
+			ListenMode *string `json:"listenMode"`
 		}
 		if err := readJSON(r, &b); err != nil {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
@@ -2300,13 +2306,30 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if b.UpdateURL != nil {
 			st.Settings.UpdateURL = strings.TrimSpace(*b.UpdateURL)
 		}
+		restart := false
+		if b.ListenMode != nil {
+			m := strings.TrimSpace(*b.ListenMode)
+			if m != "all" {
+				m = "local"
+			}
+			if m != st.Settings.ListenMode {
+				st.Settings.ListenMode = m
+				restart = true
+			}
+		}
 		if err := saveStore(st); err != nil {
 			mu.Unlock()
 			saveFailed(w, err)
 			return
 		}
 		mu.Unlock()
-		writeJSON(w, 200, map[string]any{"ok": true, "preflight": preflightEnabled(st)})
+		writeJSON(w, 200, map[string]any{"ok": true, "preflight": preflightEnabled(st), "needRestart": restart})
+		if restart {
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				restartSelf()
+			}()
+		}
 
 	case r.Method == http.MethodGet && p == "/api/inspect":
 		// 诊断：看看这台库上的索引元数据能不能读到
@@ -2391,7 +2414,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case r.Method == http.MethodGet && p == "/api/health":
-		writeJSON(w, 200, map[string]any{"ok": true, "version": appVersion, "build": buildTime, "pid": os.Getpid()})
+		mu.Lock()
+		stH := loadStore()
+		mu.Unlock()
+		mode := stH.Settings.ListenMode
+		if mode == "" {
+			mode = "local"
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "version": appVersion, "build": buildTime,
+			"pid": os.Getpid(), "listenMode": mode, "host": os.Getenv("HOST")})
 
 	case r.Method == http.MethodPost && p == "/api/shutdown":
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -3256,7 +3287,7 @@ func ensureInstance(port string) bool {
 	if !alive {
 		return true
 	}
-	if ver == appVersion {
+	if ver == appVersion && os.Getenv("MEDUPDATE_RESTART") != "1" {
 		fmt.Printf("  已有同版本实例在运行（v%s），直接打开浏览器\n", ver)
 		return false
 	}
@@ -3272,6 +3303,23 @@ func ensureInstance(port string) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return true
+}
+
+// restartSelf：起一个新进程接管，然后自己退出
+func restartSelf() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(exe)
+	cmd.Env = append(os.Environ(), "MEDUPDATE_RESTART=1")
+	cmd.Dir = appHome
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Println("  自动重启失败，请手动重新打开：", err)
+		return
+	}
+	os.Exit(0)
 }
 
 func main() {
@@ -3299,7 +3347,14 @@ func main() {
 	}
 	host := os.Getenv("HOST")
 	if host == "" {
-		host = "0.0.0.0"
+		mu.Lock()
+		st := loadStore()
+		mu.Unlock()
+		if st.Settings.ListenMode == "all" {
+			host = "0.0.0.0"
+		} else {
+			host = "127.0.0.1"
+		}
 	}
 
 	var h http.Handler = http.HandlerFunc(handler)

@@ -579,6 +579,9 @@
   .verPill .ghBtn{width:17px;height:17px;margin-left:1px;border:0;background:transparent;
     border-radius:4px;color:#9fb2cb;padding:0}
   .verPill .ghBtn:hover{background:#1d2b3d;color:#ffffff}
+  .kvRow{display:flex;gap:9px;align-items:baseline;margin-top:10px;font-size:11.5px;color:#8fa3bd}
+  .kvRow .kvK{flex:none;color:#6f7d92}
+  .kvRow .kvV{font:11.5px ui-monospace,Menlo,monospace;color:#a9c2e0;word-break:break-all;user-select:text}
 </style>
 </head>
 <body>
@@ -1330,7 +1333,9 @@ function currentSql() {
 function currentSqlInfo() {
   const ta = $('sql');
   const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd).trim();
-  return { text: sel || ta.value, selOnly: !!sel };
+  // 锁定状态（未点「编辑」）不允许只跑选中的片段，只能整段执行
+  const useSel = EDIT_MODE && !!sel && sel !== ta.value.trim();
+  return { text: useSel ? sel : ta.value, selOnly: useSel };
 }
 
 /* ================= 美化 ================= */
@@ -1866,12 +1871,15 @@ function safeRender(fn) {
 // 检查升级源里的 version.json，有新版本就显示下载入口
 const REPO_URL = 'https://github.com/wcbspp/medupdate-tool';
 let UPDATE_INFO = null;
+let UPDATE_BASE = '';
 let APP_VERSION = '';
 
 async function checkUpdate() {
   try {
     const r = await api('/api/update/check');
-    if (!r || !r.enabled || !r.hasUpdate) return;
+    if (!r) return;
+    if (r.base) UPDATE_BASE = r.base;
+    if (!r.enabled || !r.hasUpdate) return;
     UPDATE_INFO = r;
     const dot = $('updDot');
     if (dot) dot.style.display = 'inline-block';
@@ -1881,7 +1889,10 @@ async function checkUpdate() {
 }
 
 // 点版本号：显示版本信息、更新说明（如有）和仓库地址
-function openUpdate() {
+async function openUpdate() {
+  if (!UPDATE_BASE) {
+    try { const st = await api('/api/settings'); if (st && st.updateUrl) UPDATE_BASE = st.updateUrl; } catch (e) {}
+  }
   const r = UPDATE_INFO;
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
   const f = r ? (isMac ? (r.mac || r.win) : (r.win || r.mac)) : null;
@@ -1902,6 +1913,7 @@ function openUpdate() {
 
   dlg.innerHTML = `<h3>${head}</h3>
     ${body}
+    <div class="kvRow"><span class="kvK">更新服务器</span><code class="kvV" title="只读，修改请到设置">${esc(UPDATE_BASE || '未配置')}</code></div>
     <div class="repoBox">
       <span class="repoLbl">仓库</span>
       <a href="${REPO_URL}" target="_blank" rel="noopener"><span class="repoIco"><svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></span>${esc(REPO_URL.replace('https://github.com/', ''))} ↗</a>

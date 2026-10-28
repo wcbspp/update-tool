@@ -38,6 +38,15 @@ var assets embed.FS
 
 const maxRows = 500
 
+// 预检里的重查询（行数、重复、冲突）各自限时。
+// 等满 DQL 超时（可能是几分钟）会把“执行前预检”变成折磨；超时就退回执行计划估算或给提醒。
+// shortcut: 每条 20 秒上限，百万行以内足够；确实更慢的表请用执行计划估算的结论
+const pfQueryBudget = 20 * time.Second
+
+func pfCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), pfQueryBudget)
+}
+
 // 编译时注入：-X main.buildTime=20261028-0245
 var buildTime = "dev"
 
@@ -503,9 +512,16 @@ func splitStatements(text string) []string {
 		}
 		switch {
 		case c == '-' && n == '-':
+			// MySQL 只有 “-- ”（后面跟空白）才是注释；a--b 是两个减号
+			if i+2 < len(rs) && rs[i+2] != ' ' && rs[i+2] != '\t' && rs[i+2] != '\n' && rs[i+2] != '\r' {
+				buf.WriteRune(c)
+				break
+			}
 			inLine = true
 			i++
 			buf.WriteRune('\n')
+		case c == '#':
+			inLine = true
 		case c == '/' && n == '*':
 			inBlock = true
 			i++
@@ -977,8 +993,10 @@ func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
 // 两者绝不能混为一谈：把超时当成空表会让用户去重灌数据。
 func tableCountBounded(db *sql.DB, t string, cap int64) (int64, bool, error) {
 	var n int64
+	ctx, cancel := pfCtx()
+	defer cancel()
 	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s LIMIT %d) x", quoteIdent(t), cap+1)
-	if err := db.QueryRow(q).Scan(&n); err != nil {
+	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
 		return 0, false, err
 	}
 	if n > cap {
@@ -1486,7 +1504,9 @@ func dupCountCapped(db *sql.DB, table string, cols []string, capCap int) (int64,
 	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s GROUP BY %s HAVING COUNT(*)>1 LIMIT %d) t",
 		quoteIdent(table), strings.Join(quoted, ","), capCap+1)
 	var n int64
-	err := db.QueryRow(q).Scan(&n)
+	ctx, cancel := pfCtx()
+	defer cancel()
+	err := db.QueryRowContext(ctx, q).Scan(&n)
 	if n > int64(capCap) {
 		return int64(capCap), true, err
 	}
@@ -1597,7 +1617,9 @@ func conflictCountPairs(db *sql.DB, target, src string, pairs [][2]string, capN 
 	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s s STRAIGHT_JOIN %s t ON %s LIMIT %d) x",
 		quoteIdent(src), quoteIdent(target), strings.Join(conds, " AND "), capN+1)
 	var n int64
-	err := db.QueryRow(q).Scan(&n)
+	ctx, cancel := pfCtx()
+	defer cancel()
+	err := db.QueryRowContext(ctx, q).Scan(&n)
 	if n > int64(capN) {
 		return int64(capN), true, err
 	}
@@ -1874,7 +1896,9 @@ func estimateUpdate(db *sql.DB, schema, st string) (int64, string, string, bool)
 	}
 	q += fmt.Sprintf(" LIMIT %d) x", capN+1)
 	var n int64
-	if err := db.QueryRow(q).Scan(&n); err == nil {
+	ctx, cancel := pfCtx()
+	defer cancel()
+	if err := db.QueryRowContext(ctx, q).Scan(&n); err == nil {
 		if n > capN {
 			return capN, "cap", explainIndexes(db, q), true
 		}

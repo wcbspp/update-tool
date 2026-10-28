@@ -160,3 +160,16 @@ func TestExecGuardRejectsImplicitCommit(t *testing.T) {
 		}
 	}
 }
+
+// 预检查询超时的取值：0/未填 → 20 秒，-1 → 不限，正数按配置
+func TestDsPFSec(t *testing.T) {
+	cases := []struct {
+		in   int
+		want int
+	}{{0, 20}, {-1, 0}, {7, 7}, {300, 300}}
+	for _, c := range cases {
+		if got := dsPFSec(DataSource{PFSec: c.in}); got != c.want {
+			t.Fatalf("PFSec=%d → %d，期望 %d", c.in, got, c.want)
+		}
+	}
+}

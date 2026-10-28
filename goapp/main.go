@@ -38,13 +38,14 @@ var assets embed.FS
 
 const maxRows = 500
 
-// 预检里的重查询（行数、重复、冲突）各自限时。
-// 等满 DQL 超时（可能是几分钟）会把“执行前预检”变成折磨；超时就退回执行计划估算或给提醒。
-// shortcut: 每条 20 秒上限，百万行以内足够；确实更慢的表请用执行计划估算的结论
-const pfQueryBudget = 20 * time.Second
-
-func pfCtx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), pfQueryBudget)
+// 预检里的重查询（行数、重复、冲突、影响行数）各自限时。
+// 等满 DQL 超时（可能是几分钟）会把“执行前预检”变成折磨；
+// 超时立刻降级成提醒或执行计划估算，不会卡住更新。秒数可在数据源里配（pfSec）。
+func pfCtx(sec int) (context.Context, context.CancelFunc) {
+	if sec <= 0 {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithTimeout(context.Background(), time.Duration(sec)*time.Second)
 }
 
 // 编译时注入：-X main.buildTime=20261028-0245
@@ -68,6 +69,7 @@ type DataSource struct {
 	ConnSec int `json:"connSec"` // 连接超时，秒，默认 10
 	DQLSec  int `json:"dqlSec"`  // DQL（查询/统计）超时，秒，默认 60
 	DMLSec  int `json:"dmlSec"`  // DML（执行写入）超时，秒，默认 1800；0 表示不限
+	PFSec   int `json:"pfSec"`   // 预检里单条重查询超时，秒，默认 20；-1 表示不限（只受 DQL 约束）
 	// 兼容旧字段
 	IOSec  int `json:"ioSec,omitempty"`
 	SelSec int `json:"selSec,omitempty"`
@@ -92,6 +94,18 @@ func dsDQLSec(d DataSource) int {
 		return d.SelMs / 1000
 	}
 	return 60
+}
+
+// dsPFSec：预检里行数/重复/冲突/影响行数这类重查询的单条上限。
+// 默认 20 秒；填 -1 表示不加这条上限，交给 DQL 超时控制。
+func dsPFSec(d DataSource) int {
+	if d.PFSec < 0 {
+		return 0
+	}
+	if d.PFSec > 0 {
+		return d.PFSec
+	}
+	return 20
 }
 
 func dsDMLSec(d DataSource) int {
@@ -991,9 +1005,9 @@ func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
 // tableCountBounded：最多数到 cap 行就停，避免大表全表扫描。
 // 第三个返回值区分「真的是 0 行」和「没数出来（超时/权限）」——
 // 两者绝不能混为一谈：把超时当成空表会让用户去重灌数据。
-func tableCountBounded(db *sql.DB, t string, cap int64) (int64, bool, error) {
+func tableCountBounded(db *sql.DB, t string, cap int64, pfSec int) (int64, bool, error) {
 	var n int64
-	ctx, cancel := pfCtx()
+	ctx, cancel := pfCtx(pfSec)
 	defer cancel()
 	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s LIMIT %d) x", quoteIdent(t), cap+1)
 	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
@@ -1492,7 +1506,7 @@ func indexesOf(db *sql.DB, schema, t string) (map[string][]string, []string) {
 }
 
 // dupCount: 源表内按判重键统计“重复的组数”，最多数到 capCap 组就停
-func dupCountCapped(db *sql.DB, table string, cols []string, capCap int) (int64, bool, error) {
+func dupCountCapped(db *sql.DB, table string, cols []string, capCap, pfSec int) (int64, bool, error) {
 	if len(cols) == 0 {
 		return 0, false, nil
 	}
@@ -1504,7 +1518,7 @@ func dupCountCapped(db *sql.DB, table string, cols []string, capCap int) (int64,
 	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s GROUP BY %s HAVING COUNT(*)>1 LIMIT %d) t",
 		quoteIdent(table), strings.Join(quoted, ","), capCap+1)
 	var n int64
-	ctx, cancel := pfCtx()
+	ctx, cancel := pfCtx(pfSec)
 	defer cancel()
 	err := db.QueryRowContext(ctx, q).Scan(&n)
 	if n > int64(capCap) {
@@ -1609,7 +1623,7 @@ func plainColumnRef(item string) string {
 }
 
 // conflictCountPairs 按「目标列 ↔ 源列」的对应关系数冲突行，最多数到 capN 行
-func conflictCountPairs(db *sql.DB, target, src string, pairs [][2]string, capN int) (int64, bool, error) {
+func conflictCountPairs(db *sql.DB, target, src string, pairs [][2]string, capN, pfSec int) (int64, bool, error) {
 	var conds []string
 	for _, p := range pairs {
 		conds = append(conds, "t."+quoteIdent(p[0])+"=s."+quoteIdent(p[1]))
@@ -1617,7 +1631,7 @@ func conflictCountPairs(db *sql.DB, target, src string, pairs [][2]string, capN 
 	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s s STRAIGHT_JOIN %s t ON %s LIMIT %d) x",
 		quoteIdent(src), quoteIdent(target), strings.Join(conds, " AND "), capN+1)
 	var n int64
-	ctx, cancel := pfCtx()
+	ctx, cancel := pfCtx(pfSec)
 	defer cancel()
 	err := db.QueryRowContext(ctx, q).Scan(&n)
 	if n > int64(capN) {
@@ -1626,13 +1640,13 @@ func conflictCountPairs(db *sql.DB, target, src string, pairs [][2]string, capN 
 	return n, false, err
 }
 
-func conflictCountCapped(db *sql.DB, target, src string, pk []string, capN int) (int64, bool, error) {
+func conflictCountCapped(db *sql.DB, target, src string, pk []string, capN, pfSec int) (int64, bool, error) {
 	// 用小批次表驱动，避免优化器拿几千万行的目标表当驱动表去全表扫
 	pairs := make([][2]string, 0, len(pk))
 	for _, c := range pk {
 		pairs = append(pairs, [2]string{c, c})
 	}
-	return conflictCountPairs(db, target, src, pairs, capN)
+	return conflictCountPairs(db, target, src, pairs, capN, pfSec)
 }
 
 // 每张批次表的版本号：期望前缀的值 + 不该出现的值（标红用）
@@ -1849,7 +1863,7 @@ func explainIndexes(db *sql.DB, q string) string {
 	return strings.Join(parts, " + ")
 }
 
-func estimateUpdate(db *sql.DB, schema, st string) (int64, string, string, bool) {
+func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, string, bool) {
 	const capN = 300000
 
 	m := reUpdate.FindStringSubmatch(st)
@@ -1896,7 +1910,7 @@ func estimateUpdate(db *sql.DB, schema, st string) (int64, string, string, bool)
 	}
 	q += fmt.Sprintf(" LIMIT %d) x", capN+1)
 	var n int64
-	ctx, cancel := pfCtx()
+	ctx, cancel := pfCtx(pfSec)
 	defer cancel()
 	if err := db.QueryRowContext(ctx, q).Scan(&n); err == nil {
 		if n > capN {
@@ -2093,6 +2107,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 
 	conns := newPfConns(ds)
 	defer conns.Close()
+	pfSec := dsPFSec(ds)
 
 	schema := ds.Database
 	if schema == "" {
@@ -2165,7 +2180,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			)
 			tasks := []func(*sql.DB){func(c *sql.DB) {
 				t0 := time.Now()
-				n, capped, cntErr = tableCountBounded(c, src, 300000)
+				n, capped, cntErr = tableCountBounded(c, src, 300000, pfSec)
 				durCnt = time.Since(t0)
 			}}
 			if mapOK && len(pk) > 0 {
@@ -2177,12 +2192,12 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 				tasks = append(tasks, func(c *sql.DB) {
 					t0 := time.Now()
-					dup, dupTrunc, dupErr = dupCountCapped(c, src, srcCols, 1000)
+					dup, dupTrunc, dupErr = dupCountCapped(c, src, srcCols, 1000, pfSec)
 					durDup = time.Since(t0)
 				})
 				tasks = append(tasks, func(c *sql.DB) {
 					t0 := time.Now()
-					conf, confTrunc, confErr = conflictCountPairs(c, target, src, pairs, 1000)
+					conf, confTrunc, confErr = conflictCountPairs(c, target, src, pairs, 1000, pfSec)
 					durConf = time.Since(t0)
 				})
 			}
@@ -2367,7 +2382,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			)
 			tasks := []func(*sql.DB){func(c *sql.DB) {
 				t0 := time.Now()
-				estN, estNote, estIdx, estOK = estimateUpdate(c, schema, st)
+				estN, estNote, estIdx, estOK = estimateUpdate(c, schema, st, pfSec)
 				estDur = time.Since(t0)
 			}}
 			for _, r := range refs {
@@ -2377,7 +2392,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				rt := r.table
 				tasks = append(tasks, func(c *sql.DB) {
 					t0 := time.Now()
-					n, capped, cerr := tableCountBounded(c, rt, 300000)
+					n, capped, cerr := tableCountBounded(c, rt, 300000, pfSec)
 					cntMu.Lock()
 					cnts[rt] = srcCnt{n: n, capped: capped, err: cerr, dur: time.Since(t0)}
 					cntMu.Unlock()
@@ -2630,7 +2645,7 @@ func buildTree(s Store) map[string]any {
 		dsList = append(dsList, map[string]any{
 			"id": d.ID, "name": d.Name, "host": d.Host, "port": d.Port,
 			"user": d.User, "database": d.Database, "hasPassword": d.Pass != "", "env": envOf(d),
-			"connSec": dsConnSec(d), "dqlSec": dsDQLSec(d), "dmlSec": dsDMLSec(d),
+			"connSec": dsConnSec(d), "dqlSec": dsDQLSec(d), "dmlSec": dsDMLSec(d), "pfSec": d.PFSec,
 		})
 	}
 
@@ -3017,6 +3032,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			IOSec         *flexInt `json:"ioSec"`
 			DQLSec        *flexInt `json:"dqlSec"`
 			DMLSec        *flexInt `json:"dmlSec"`
+			PFSec         *flexInt `json:"pfSec"`
 			SelSec        *flexInt `json:"selSec"` // 兼容旧字段
 		}
 		if err := readJSON(r, &b); err != nil {
@@ -3077,6 +3093,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		if b.IOSec != nil && b.DMLSec == nil {
 			ds.DMLSec = int(*b.IOSec)
+		}
+		if b.PFSec != nil {
+			ds.PFSec = int(*b.PFSec)
 		}
 		if b.DMLSec != nil {
 			v := int(*b.DMLSec)

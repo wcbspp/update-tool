@@ -1166,7 +1166,8 @@ async function editDs(key) {
         options: [{ v: 'prod', t: '生产' }, { v: 'test', t: '测试' }] },
       { k: 'connSec', label: '连接超时（秒，默认 10）', value: ds ? (ds.connSec || 10) : 10 },
       { k: 'dqlSec', label: 'DQL 超时（秒，默认 60）：查询与预检统计', value: ds ? (ds.dqlSec || 60) : 60 },
-      { k: 'dmlSec', label: 'DML 超时（秒，默认 1800）：执行写入，0 表示不限', value: ds ? (ds.dmlSec == null ? 1800 : ds.dmlSec) : 1800 }
+      { k: 'dmlSec', label: 'DML 超时（秒，默认 1800）：执行写入，0 表示不限', value: ds ? (ds.dmlSec == null ? 1800 : ds.dmlSec) : 1800 },
+      { k: 'pfSec', label: '预检查询超时（秒，默认 20，-1 不限）：预检里数行数/查冲突的单条上限', value: ds ? (ds.pfSec === -1 ? -1 : (ds.pfSec || 20)) : 20 }
     ],
     onDelete: ds ? () => {} : null,
     extraLabel: '列出库 / 测试',
@@ -1174,7 +1175,7 @@ async function editDs(key) {
   });
   if (!vals) return;
   if (vals.__delete) { await del('/api/ds?id=' + id); await loadTree(); return; }
-  const body = { id: ds ? ds.id : undefined, name: vals.name, host: vals.host, port: Number(vals.port || 3306), user: vals.user, database: vals.database, env: (vals.env || 'prod'), connSec: Number(vals.connSec || 10), dqlSec: Number(vals.dqlSec || 60), dmlSec: Number(vals.dmlSec === '' ? 1800 : vals.dmlSec) };
+  const body = { id: ds ? ds.id : undefined, name: vals.name, host: vals.host, port: Number(vals.port || 3306), user: vals.user, database: vals.database, env: (vals.env || 'prod'), connSec: Number(vals.connSec || 10), dqlSec: Number(vals.dqlSec || 60), dmlSec: Number(vals.dmlSec === '' ? 1800 : vals.dmlSec), pfSec: Number(vals.pfSec === '' ? 20 : vals.pfSec) };
   const pw = vals['pass' + 'word'];
   if (pw) body['pass' + 'word'] = pw;
   await post('/api/ds', body);

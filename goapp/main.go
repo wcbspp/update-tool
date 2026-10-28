@@ -3092,15 +3092,28 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		hasErr := false
+		errN, warnN := 0, 0
 		for _, c := range checks {
-			if c["level"] == "error" {
+			switch c["level"] {
+			case "error":
 				hasErr = true
+				errN++
+			case "warn":
+				warnN++
 			}
 		}
 		previews := make([]string, len(stmts))
 		for i, st := range stmts {
 			previews[i] = preview(st)
 		}
+		// 每次预检都留一条记录（成功也记），便于回看当时结论
+		appendLog(map[string]any{
+			"ts": time.Now().Format(time.RFC3339), "type": "preflight",
+			"script": sc.Name, "ds": ds.Name, "database": ds.Database,
+			"dryRun": false, "stmts": len(stmts), "ok": !hasErr,
+			"ms": time.Since(pfStart).Milliseconds(), "failedAt": -1,
+			"errCount": errN, "warnCount": warnN,
+		})
 		writeJSON(w, 200, map[string]any{"ok": !hasErr, "checks": checks, "versions": versions, "count": len(stmts), "previews": previews, "ms": time.Since(pfStart).Milliseconds()})
 
 	case r.Method == http.MethodPost && p == "/api/check":

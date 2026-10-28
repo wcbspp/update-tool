@@ -2148,6 +2148,7 @@ function logDetail(l) {
   lines.push(`数据源：${l.ds || '-'}    库：${l.database || '-'}`);
   lines.push(`时间：${l.ts}    模式：${l.dryRun ? '预演' : '执行'}    耗时：${l.ms}ms    语句：${l.stmts} 条`);
   lines.push(`影响行数：${l.affected || 0}    数据版本：${logVersion(l) || '-'}`);
+  if (l.type === 'preflight') lines.push(`类型：预检（只读）    错误 ${l.errCount || 0} 项    提醒 ${l.warnCount || 0} 项`);
   if (l.failedAt != null && l.failedAt >= 0) lines.push(`失败位置：第 ${l.failedAt + 1} 条`);
   if (l.error) lines.push(`错误：${l.error}`);
   if (Array.isArray(l.previews) && l.previews.length) {

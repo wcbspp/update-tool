@@ -508,10 +508,6 @@
   .chk .go{margin-left:auto;flex:none;font-size:11px;color:#7fb2ff;border:1px solid #2c4a72;
     background:#0d1726;border-radius:5px;padding:1px 7px;cursor:pointer;white-space:nowrap}
   .chk .go:hover{background:#152740;border-color:#4d7fbf;color:#cfe4ff}
-  #newver{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:80;display:none;
-    align-items:center;gap:10px;padding:7px 14px;border-radius:8px;font-size:12.5px;cursor:pointer;
-    background:#1d3350;border:1px solid #4d7fbf;color:#dbeafe;box-shadow:0 6px 20px -6px #000}
-  #newver:hover{background:#24406a}
 
   /* 结果里的语句不再截断成一行 */
   .sqlprev{white-space:pre-wrap;word-break:break-word;overflow:visible;text-overflow:clip;line-height:1.55}
@@ -585,7 +581,6 @@
 </style>
 </head>
 <body>
-  <div id="newver" onclick="location.reload()">发现新版本，点这里刷新</div>
 <header>
   <div class="brand">
     <h1>update-tool</h1>
@@ -2120,15 +2115,7 @@ function initResizer() {
       const vtxt = $('verText');
       if (vtxt && h.version) vtxt.textContent = 'v' + h.version + ' · 创意 by 吴美丽';
     }).catch(() => {});
-    setInterval(() => {
-      if (!BOOTED_BUILD) return;
-      fetch('/api/health', { cache: 'no-store' }).then(r => r.json()).then(h => {
-        if (h && h.build && h.build !== BOOTED_BUILD) {
-          const el = $('newver');
-          if (el && el.style.display !== 'flex') { el.textContent = '有新版本，点这里刷新'; el.style.display = 'flex'; }
-        }
-      }).catch(() => {});
-    }, 15000);
+
   } catch (e) { toast('初始化失败：' + e.message, 'bad'); }
 })();
 

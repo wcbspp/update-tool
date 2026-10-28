@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>使用说明 · update-tool</title>
+<style>
+  :root{
+    --bg:#0b0e14;--panel:#11151d;--line:#232a36;--fg:#e6eaf2;--dim:#8b94a7;
+    --acc:#5fa2ff;--warn:#f0a45a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.85 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{max-width:860px;margin:0 auto;padding:44px 28px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}
+  h1{font-size:20px;margin:0 0 6px;font-weight:700}
+  .sub{font-size:12px;color:#5f6a7d;font-family:ui-monospace,Menlo,monospace}
+  .lead{font-size:14px;color:#c2cddd;background:#11161f;border-left:3px solid var(--acc);
+    padding:12px 16px;border-radius:0 6px 6px 0;margin:0 0 26px}
+  h2{font-size:14px;margin:30px 0 10px;color:#e6ecf6;font-weight:600}
+  p{margin:0 0 10px;color:#a9b5c6}
+  ul,ol{margin:0 0 10px;padding-left:22px;color:#a9b5c6}
+  li{margin:3px 0}
+  code{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#8fb6f0;
+    background:#12203a;padding:1px 6px;border-radius:4px}
+  pre{margin:8px 0 12px;padding:10px 14px;background:#0d131c;border:1px solid #1d2735;
+    border-left:3px solid var(--acc);border-radius:6px;overflow:auto}
+  pre code{background:none;padding:0;color:#9ecbff;font-size:12.5px}
+  mark.hl{background:#1b2c48;color:#a8c8ff;padding:0 5px;border-radius:4px;font-weight:600}
+  mark.hl-warn{background:#3a2110;color:#f0b070;padding:0 5px;border-radius:4px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:6px 0 14px;font-size:12.5px}
+  th,td{border:1px solid #232b38;padding:6px 10px;text-align:left}
+  th{background:#151c27;color:#c9d4e3;font-weight:600}
+  td{color:#a9b5c6;font-family:ui-monospace,Menlo,monospace}
+  .warn{background:#2a1114;border:1px solid #50222a;border-radius:8px;padding:14px 16px;margin:26px 0}
+  .warn h3{margin:0 0 6px;font-size:13.5px;color:var(--warn)}
+  .warn p{margin:0;color:#e0b48a}
+  .tip{font-size:12.5px;color:#67728a;margin-top:34px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>使用说明</h1>
+    <div class="sub">update-tool v1.0.1 · 示例地区（统筹区 2107）省集中版本</div>
+  </header>
+
+  <p class="lead">把原来手工执行的一串 SQL 收进一个可复核的操作台，<b>防止手抖</b>——降低连错库、漏改语句、重复执行、条件写错的风险。</p>
+
+  <h2>能做什么</h2>
+  <ul>
+    <li><b>语法校验</b>：逐条 <code>EXPLAIN</code>，查语法、表和字段是否存在、权限够不够；不改数据</li>
+    <li><b>数据预检</b>：<mark class="hl">主键冲突</mark>、源表是否为空、列数是否一致、预计影响行数、本次数据版本</li>
+    <li><b>版本号核对</b>：从批次表的 <code>CRTER_ID</code> 取值去重，执行前摆出来；不符合 NV / LC / LT / LM 前缀的值标红</li>
+    <li><b>执行</b>：整段 SQL 在一个事务里跑，任一语句失败<mark class="hl">整体回滚</mark>；含 <mark class="hl-warn">DDL</mark> 或 COMMIT / ROLLBACK <mark class="hl-warn">直接拒跑</mark></li>
+    <li><b>执行日志</b>：每次执行留痕——时间、脚本、数据源、语句数、耗时、成败、失败位置</li>
+    <li><b>只读保护</b>：SQL 默认只读，点“编辑”才能改，保存后自动切回只读</li>
+    <li><b>分组管理</b>：数据源 → 文件夹 → 脚本；数据源挂在顶层文件夹上，数据预检与版本规则可按文件夹设，单条脚本可单独覆盖</li>
+  </ul>
+
+  <h2>涉及的表</h2>
+  <table>
+    <thead><tr><th>更新源表（本批次）</th><th>目标表（正式目录）</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr><td>hilist_b_update_2107</td><td>hilist_b</td><td>基本业务目录</td></tr>
+      <tr><td>hilist_selfpay_prop_b_update_2107</td><td>hilist_selfpay_prop_b</td><td>自付比例</td></tr>
+      <tr><td>medlist_hilist_map_b_update_2107</td><td>medlist_hilist_map_b</td><td>对照关系</td></tr>
+      <tr><td>hilist_lmtpric_d_update_2107</td><td>hilist_lmtpric_d</td><td>限价信息</td></tr>
+      <tr><td>medlist_sp_attr_mnt_b_update_2107</td><td>medlist_sp_attr_mnt_b</td><td>特殊属性（高值药品）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>更新内容</h2>
+  <p>基本业务目录、自付比例、限价信息、对照关系、特殊属性表（高值药品）。</p>
+
+  <h2>目录有效期规则</h2>
+  <p>更新采用“关旧开新”：把原记录的结束时间设成新目录开始日期的<mark class="hl">前一天</mark>。</p>
+  <pre><code>ENDDATE = DATE_SUB(B.BEGNDATE, INTERVAL 1 day)</code></pre>
+  <p>例：新目录 <code>2026-10-25</code> 生效，旧记录的 <code>ENDDATE</code> 写成 <code>2026-10-24</code>；新记录的 <code>ENDDATE</code> 为 <code>NULL</code>，表示当前有效。</p>
+  <p>关闭旧记录时一般带条件 <code>ENDDATE IS NULL OR ENDDATE &gt;= B.BEGNDATE</code>，避免把已经失效的历史记录重复改写。同一时间段内不能有空档，也不能重叠——这是省集中版本目录的基本要求。</p>
+
+  <h2>使用流程</h2>
+  <ol>
+    <li>左侧选择脚本（脚本所在文件夹已绑定数据源）</li>
+    <li>点 <b>数据预检</b>：看主键是否冲突、源表是否有数据、列数是否对得上、预计影响多少行、版本号对不对</li>
+    <li>点 <b>执行</b>：确认框里再核对一次版本号与影响行数，确认后提交</li>
+    <li>到 <b>执行日志</b> 复核本次结果；有失败会标出是第几条</li>
+  </ol>
+
+  <h2>预检的数字与索引</h2>
+  <ul>
+    <li><b>影响行数是“预计”值</b>：预检按当前数据实际统计，不是估值；但为避免拖慢数据库，最多数到 30 万行，超过会显示 <code>≥ 300000</code></li>
+    <li><b>预检需要索引支撑</b>：主键冲突比对要按判重列查目标表，如果表上没有合适的索引，会退化成全表扫，工具会直接提示“缺少可用索引”，请先补索引再预检</li>
+    <li>索引不合适时不会硬跑，只提示；执行功能本身不受影响</li>
+  </ul>
+
+  <h3>超时设置（每个数据源可单独配）</h3>
+  <ul>
+    <li><b>连接超时</b>：默认 10 秒。网络不通时不用干等</li>
+    <li><b>DQL 超时</b>：默认 60 秒。管查询类语句，包括预检里的统计查询；超了会显示「未计算」而不是报错</li>
+    <li><b>DML 超时</b>：默认 1800 秒（30 分钟）。管执行阶段的写入语句，超时会被中断并整体回滚；填 0 表示不限</li>
+    <li>网络读写超时不用单独设，工具取 DQL、DML 的较大值再留 60 秒余量</li>
+  </ul>
+
+  <h2>安全边界</h2>
+  <ul>
+    <li>整段 SQL 在<mark class="hl">一个事务</mark>内执行，失败<mark class="hl">整体回滚</mark>，不会出现“改了一半”</li>
+    <li>脚本含 <mark class="hl-warn">DDL</mark>（建表 / 改表 / 清空）会被<mark class="hl-warn">拒绝</mark>，请单独在客户端处理——DDL 会隐式提交，回滚保不住</li>
+    <li>脚本内写 COMMIT / ROLLBACK 同样会被拒绝，事务由工具统一管理</li>
+    <li>数据预检为只读，不改动任何数据；执行前的确认框不可跳过</li>
+    <li>自增 ID 会跳号、触发器里的外部副作用无法回滚，这两点由数据库本身决定</li>
+  </ul>
+
+  <h2>术语</h2>
+  <ul>
+    <li><b>三目</b>：药品、诊疗项目、医用耗材三类目录</li>
+    <li><b>批次表</b>：带 <code>_update_2107</code> 后缀的表，存放本次待更新数据</li>
+    <li><b>目标表</b>：正式目录表，更新后生效的地方</li>
+    <li><b>统筹区</b>：<code>POOLAREA_NO</code>，示例地区为 <code>000000</code></li>
+    <li><b>CRTER_ID</b>：生成这批数据时的版本号，用来核对跑的是哪一批</li>
+  </ul>
+
+  <div class="warn">
+    <h3>更新数据前请务必备份</h3>
+    <p>工具能回滚“执行失败”，但回滚不了“条件写错”。更新前请先备份目标表，或确认已存在可用的备份。</p>
+  </div>
+
+  <div class="tip">update-tool · 内部工具 · 创意 by 吴美丽</div>
+</div>
+</body>
+</html>

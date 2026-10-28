@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b2536"/>
+      <stop offset="1" stop-color="#0d1219"/>
+    </linearGradient>
+    <linearGradient id="fur" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b07a4e"/>
+      <stop offset="1" stop-color="#7d5230"/>
+    </linearGradient>
+    <linearGradient id="shirt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8ad96f"/>
+      <stop offset="1" stop-color="#4f9640"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5aa9ff"/>
+      <stop offset="1" stop-color="#2f6fae"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="108" fill="url(#bg)"/>
+  <circle cx="256" cy="150" r="120" fill="#16233a" opacity=".55"/>
+
+  <!-- 桌子 -->
+  <rect x="70" y="392" width="372" height="18" rx="9" fill="#2a1f16"/>
+  <rect x="70" y="410" width="372" height="26" rx="9" fill="#1f160f"/>
+
+  <!-- 身体 -->
+  <rect x="120" y="212" width="150" height="150" rx="52" fill="url(#fur)"/>
+  <rect x="128" y="286" width="134" height="72" rx="30" fill="url(#shirt)"/>
+  <rect x="128" y="306" width="134" height="9" rx="4" fill="#e8cf4e"/>
+
+  <!-- 头 -->
+  <ellipse cx="300" cy="176" rx="86" ry="78" fill="url(#fur)"/>
+  <!-- 耳朵 -->
+  <ellipse cx="228" cy="120" rx="30" ry="17" fill="#7d5230" transform="rotate(-28 228 120)"/>
+  <ellipse cx="372" cy="120" rx="30" ry="17" fill="#7d5230" transform="rotate(28 372 120)"/>
+  <!-- 角 -->
+  <path d="M243 92 l10 -26 l14 22 z" fill="#e9dcc4"/>
+  <path d="M357 92 l-10 -26 l-14 22 z" fill="#e9dcc4"/>
+  <!-- 口鼻 -->
+  <ellipse cx="318" cy="212" rx="52" ry="34" fill="#f0d3b4"/>
+  <ellipse cx="300" cy="212" rx="8" ry="6" fill="#8b5f3d"/>
+  <ellipse cx="336" cy="212" rx="8" ry="6" fill="#8b5f3d"/>
+
+  <!-- 眼镜 -->
+  <circle cx="272" cy="160" r="30" fill="#0e1622" opacity=".85"/>
+  <circle cx="334" cy="160" r="30" fill="#0e1622" opacity=".85"/>
+  <rect x="298" y="156" width="12" height="7" rx="3" fill="#7fd3ff"/>
+  <circle cx="272" cy="160" r="30" fill="none" stroke="#8fd6ff" stroke-width="5"/>
+  <circle cx="334" cy="160" r="30" fill="none" stroke="#8fd6ff" stroke-width="5"/>
+  <!-- 眼睛高光 -->
+  <circle cx="264" cy="152" r="7" fill="#dff3ff"/>
+  <circle cx="326" cy="152" r="7" fill="#dff3ff"/>
+
+  <!-- 笔记本 -->
+  <rect x="252" y="300" width="200" height="14" rx="7" fill="#c8d2e0"/>
+  <rect x="272" y="196" width="160" height="106" rx="12" fill="#0f1622" stroke="#5b7fa8" stroke-width="6"/>
+  <rect x="284" y="208" width="136" height="82" rx="6" fill="url(#screen)" opacity=".85"/>
+  <!-- 屏幕上的代码行 -->
+  <rect x="296" y="222" width="76" height="8" rx="4" fill="#d9ecff" opacity=".9"/>
+  <rect x="296" y="240" width="104" height="8" rx="4" fill="#d9ecff" opacity=".7"/>
+  <rect x="296" y="258" width="56" height="8" rx="4" fill="#d9ecff" opacity=".85"/>
+  <rect x="296" y="276" width="88" height="8" rx="4" fill="#d9ecff" opacity=".55"/>
+
+  <!-- 手 -->
+  <rect x="196" y="316" width="72" height="26" rx="13" fill="#a9744d"/>
+  <rect x="330" y="330" width="86" height="26" rx="13" fill="#8b5f36"/>
+
+  <!-- 汗滴 -->
+  <ellipse cx="404" cy="128" rx="10" ry="15" fill="#7fc9ff" opacity=".9"/>
+  <ellipse cx="424" cy="164" rx="7" ry="11" fill="#7fc9ff" opacity=".65"/>
+</svg>

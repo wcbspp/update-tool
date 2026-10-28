@@ -550,6 +550,11 @@
     margin-left:6px;vertical-align:middle;box-shadow:0 0 0 2px rgba(255,93,93,.22)}
   #verTag.has-upd{cursor:pointer}
   #verTag.has-upd:hover{color:#fff}
+  .repoBox{margin-top:12px;padding-top:9px;border-top:1px solid #1e2836;
+    font:11.5px ui-monospace,Menlo,monospace;color:#8fa3bd;display:flex;gap:8px;align-items:center}
+  .repoLbl{color:#5f6a7d}
+  .repoBox a{color:#7fb2ff;text-decoration:none}
+  .repoBox a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -1835,7 +1840,9 @@ function safeRender(fn) {
 }
 
 // 检查升级源里的 version.json，有新版本就显示下载入口
+const REPO_URL = 'https://github.com/wcbspp/medupdate-tool';
 let UPDATE_INFO = null;
+let APP_VERSION = '';
 
 async function checkUpdate() {
   try {
@@ -1849,25 +1856,38 @@ async function checkUpdate() {
   } catch (e) {}
 }
 
-// 点版本号：有更新弹说明与下载，无更新提示已是最新
+// 点版本号：显示版本信息、更新说明（如有）和仓库地址
 function openUpdate() {
   const r = UPDATE_INFO;
-  if (!r) { toast('已是最新版本', 'ok'); return; }
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
-  const f = isMac ? (r.mac || r.win) : (r.win || r.mac);
+  const f = r ? (isMac ? (r.mac || r.win) : (r.win || r.mac)) : null;
   const dlg = $('dlg');
   dlg.className = 'dlg';
-  dlg.innerHTML = `<h3>发现新版本 ${esc(r.latest || '')}</h3>
-    <div style="font-size:12.5px;color:#c2cfe1;line-height:1.9;margin-top:6px">
-      当前版本：${esc(r.current || '')}<br>
-      更新说明：${esc(r.notes || '—')}
+
+  const head = r ? `发现新版本 ${esc(r.latest || '')}` : '关于';
+  const body = r
+    ? `<div style="font-size:12.5px;color:#c2cfe1;line-height:1.9;margin-top:6px">
+         当前版本：${esc(r.current || APP_VERSION)}<br>
+         最新版本：<b style="color:#7fb2ff">${esc(r.latest || '')}</b><br>
+         更新说明：${esc(r.notes || '—')}
+       </div>`
+    : `<div style="font-size:12.5px;color:#c2cfe1;line-height:1.9;margin-top:6px">
+         当前版本：<b style="color:#7fb2ff">${esc(APP_VERSION || '—')}</b><br>
+         已是最新版本。
+       </div>`;
+
+  dlg.innerHTML = `<h3>${head}</h3>
+    ${body}
+    <div class="repoBox">
+      <span class="repoLbl">仓库</span>
+      <a href="${REPO_URL}" target="_blank" rel="noopener">${esc(REPO_URL.replace('https://github.com/', ''))} ↗</a>
     </div>
     <div class="foot"><span class="l"></span>
       <button id="uCancel">关闭</button>
-      <button class="primary" id="uGo">下载 ${isMac ? 'macOS' : 'Windows'} 版</button></div>`;
+      ${f ? `<button class="primary" id="uGo">下载 ${isMac ? 'macOS' : 'Windows'} 版</button>` : ''}</div>`;
   $('mask').classList.add('on');
   $('uCancel').onclick = () => $('mask').classList.remove('on');
-  $('uGo').onclick = () => { if (f) window.open(r.base + f.url, '_blank'); };
+  if (f) $('uGo').onclick = () => window.open(r.base + f.url, '_blank');
 }
 
 function bindStmtJump() {
@@ -1899,6 +1919,8 @@ async function openSettings() {
     <div style="font-size:12px;color:#a9b8cc;line-height:1.9;margin-top:6px">
       填了之后启动时会读该地址下的 version.json 检查新版本；只读取清单，不改数据。
     </div>
+    <div class="repoBox"><span class="repoLbl">仓库</span>
+      <a href="${REPO_URL}" target="_blank" rel="noopener">${esc(REPO_URL.replace('https://github.com/', ''))} ↗</a></div>
     <div class="foot"><span class="l"></span>
       <button id="cCancel">关闭</button>
       <button class="primary" id="cOk">保存</button></div>`;
@@ -2056,6 +2078,7 @@ function initResizer() {
       if (!h || !h.build) return;
       BOOTED_BUILD = h.build;
       const vtag = $('verTag');
+      if (h.version) APP_VERSION = h.version;
       if (vtag && h.version && vtag.firstChild) {
         vtag.firstChild.nodeValue = 'v' + h.version + ' · 内部工具 · 创意 by 吴美丽';
       }

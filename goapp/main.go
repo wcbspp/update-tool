@@ -619,7 +619,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.0.8"
+const appVersion = "1.0.9"
 
 var runMu sync.Mutex
 
@@ -1976,10 +1976,10 @@ var (
 	updCache map[string]any
 )
 
-func fetchVersion(base string) (map[string]any, error) {
+func fetchVersion(base string, fresh bool) (map[string]any, error) {
 	updMu.Lock()
 	defer updMu.Unlock()
-	if updCache != nil && updBase == base && time.Since(updAt) < 5*time.Minute {
+	if !fresh && updCache != nil && updBase == base && time.Since(updAt) < 60*time.Second {
 		return updCache, nil
 	}
 	c := &http.Client{Timeout: 8 * time.Second}
@@ -2417,7 +2417,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(base, "/") {
 			base += "/"
 		}
-		ver, err := fetchVersion(base)
+		ver, err := fetchVersion(base, r.URL.Query().Get("fresh") == "1")
 		if err != nil {
 			writeJSON(w, 200, map[string]any{"enabled": true, "error": err.Error()})
 			return

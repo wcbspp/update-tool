@@ -1830,6 +1830,21 @@ function safeRender(fn) {
   }
 }
 
+// 检查升级源里的 version.json，有新版本就显示下载入口
+async function checkUpdate() {
+  try {
+    const r = await api('/api/update/check');
+    if (!r || !r.enabled || !r.hasUpdate) return;
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+    const f = isMac ? (r.mac || r.win) : (r.win || r.mac);
+    const el = $('newver');
+    if (!el || !f) return;
+    el.textContent = '发现新版本 ' + r.latest + '，点这里下载';
+    el.onclick = () => window.open(r.base + f.url, '_blank');
+    el.style.display = 'flex';
+  } catch (e) {}
+}
+
 function bindStmtJump() {
   $('res').querySelectorAll('[data-stmt]').forEach(el => {
     el.classList.add('jumpable');
@@ -1842,8 +1857,8 @@ function bindStmtJump() {
 
 
 async function openSettings() {
-  let on = PREFLIGHT_ON;
-  try { const r = await api('/api/settings'); on = !!r.preflight; } catch (e) {}
+  let on = PREFLIGHT_ON, up = '';
+  try { const r = await api('/api/settings'); on = !!r.preflight; up = r.updateUrl || ''; } catch (e) {}
   const dlg = $('dlg');
   dlg.className = 'dlg';
   dlg.innerHTML = `<h3>设置</h3>
@@ -1854,6 +1869,11 @@ async function openSettings() {
     <div style="font-size:12px;color:#a9b8cc;line-height:1.9;margin-top:6px">
       已有文件夹的设置不受影响，请点文件夹上的 ⚙ 单独设置。
     </div>
+    <label>升级源地址（可留空）</label>
+    <input id="setUp" value="${esc(up)}" placeholder="https://example.com/medupdate-xxxx/">
+    <div style="font-size:12px;color:#a9b8cc;line-height:1.9;margin-top:6px">
+      填了之后启动时会读该地址下的 version.json 检查新版本；只读取清单，不改数据。
+    </div>
     <div class="foot"><span class="l"></span>
       <button id="cCancel">关闭</button>
       <button class="primary" id="cOk">保存</button></div>`;
@@ -1863,8 +1883,9 @@ async function openSettings() {
   $('cCancel').onclick = () => close();
   $('cOk').onclick = async () => {
     const val = $('setPf').checked;
+    const url = ($('setUp') ? $('setUp').value : '').trim();
     try {
-      await post('/api/settings', { preflight: val });
+      await post('/api/settings', { preflight: val, updateUrl: url });
       PREFLIGHT_ON = val;
       toast('已保存', 'ok');
     } catch (e) { toast(e.message, 'bad'); }
@@ -1994,6 +2015,7 @@ function initResizer() {
     try { if (localStorage.getItem('niuma_paused') === '1') toggleNiuma(); } catch (e) {}
     try { localStorage.removeItem('ui_zoom'); document.documentElement.style.removeProperty('--ui-zoom'); document.body.style.zoom = ''; } catch (e) {}
     let BOOTED_BUILD = '';
+    setTimeout(() => { try { checkUpdate(); } catch (e) {} }, 1200);
     fetch('/api/health').then(r => r.json()).then(h => {
       if (!h || !h.build) return;
       BOOTED_BUILD = h.build;
@@ -2003,7 +2025,7 @@ function initResizer() {
       fetch('/api/health', { cache: 'no-store' }).then(r => r.json()).then(h => {
         if (h && h.build && h.build !== BOOTED_BUILD) {
           const el = $('newver');
-          if (el) { el.textContent = '有新版本，点这里刷新'; el.style.display = 'flex'; }
+          if (el && el.style.display !== 'flex') { el.textContent = '有新版本，点这里刷新'; el.style.display = 'flex'; }
         }
       }).catch(() => {});
     }, 15000);

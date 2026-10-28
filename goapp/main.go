@@ -141,6 +141,7 @@ type Settings struct {
 	Preflight *bool  `json:"preflight"` // nil = 默认开启（供根级脚本/new 文件夹使用）
 	VerCol    string `json:"versionCol"`
 	VerPfxs   string `json:"versionPrefixes"`
+	UpdateURL string `json:"updateUrl"` // 升级源地址，例如 https://example.com/medupdate-xxx/
 }
 
 type Store struct {
@@ -616,7 +617,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.0.1"
+const appVersion = "1.0.2"
 
 var runMu sync.Mutex
 
@@ -1965,6 +1966,37 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 /* ---------------- 工具 ---------------- */
 
 // 保存失败时的统一响应（调用方负责先释放锁）
+// 拉取升级清单，带 5 分钟缓存，避免前端频繁请求外部地址
+var (
+	updMu    sync.Mutex
+	updAt    time.Time
+	updBase  string
+	updCache map[string]any
+)
+
+func fetchVersion(base string) (map[string]any, error) {
+	updMu.Lock()
+	defer updMu.Unlock()
+	if updCache != nil && updBase == base && time.Since(updAt) < 5*time.Minute {
+		return updCache, nil
+	}
+	c := &http.Client{Timeout: 8 * time.Second}
+	resp, err := c.Get(base + "version.json")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("升级源返回 %d", resp.StatusCode)
+	}
+	var v map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v); err != nil {
+		return nil, err
+	}
+	updCache, updAt, updBase = v, time.Now(), base
+	return v, nil
+}
+
 func saveFailed(w http.ResponseWriter, err error) {
 	saveFailed(w, err)
 }
@@ -2246,11 +2278,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		st := loadStore()
 		mu.Unlock()
-		writeJSON(w, 200, map[string]any{"preflight": preflightEnabled(st)})
+		writeJSON(w, 200, map[string]any{"preflight": preflightEnabled(st), "updateUrl": st.Settings.UpdateURL})
 
 	case r.Method == http.MethodPost && p == "/api/settings":
 		var b struct {
-			Preflight *bool `json:"preflight"`
+			Preflight *bool   `json:"preflight"`
+			UpdateURL *string `json:"updateUrl"`
 		}
 		if err := readJSON(r, &b); err != nil {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
@@ -2260,6 +2293,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		st := loadStore()
 		if b.Preflight != nil {
 			st.Settings.Preflight = b.Preflight
+		}
+		if b.UpdateURL != nil {
+			st.Settings.UpdateURL = strings.TrimSpace(*b.UpdateURL)
 		}
 		if err := saveStore(st); err != nil {
 			mu.Unlock()
@@ -2353,6 +2389,39 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodGet && p == "/api/health":
 		writeJSON(w, 200, map[string]any{"ok": true, "version": appVersion, "build": buildTime, "pid": os.Getpid()})
+
+	case r.Method == http.MethodGet && p == "/api/update/check":
+		mu.Lock()
+		st := loadStore()
+		mu.Unlock()
+		base := strings.TrimSpace(st.Settings.UpdateURL)
+		if base == "" {
+			writeJSON(w, 200, map[string]any{"enabled": false})
+			return
+		}
+		if !strings.HasSuffix(base, "/") {
+			base += "/"
+		}
+		ver, err := fetchVersion(base)
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"enabled": true, "error": err.Error()})
+			return
+		}
+		latest, _ := ver["version"].(string)
+		out := map[string]any{
+			"enabled": true, "current": appVersion, "latest": latest,
+			"hasUpdate": latest != "" && latest != appVersion,
+			"notes":     ver["notes"], "build": ver["build"], "base": base,
+		}
+		if files, ok := ver["files"].(map[string]any); ok {
+			if f, ok := files["win"]; ok {
+				out["win"] = f
+			}
+			if f, ok := files["mac"]; ok {
+				out["mac"] = f
+			}
+		}
+		writeJSON(w, 200, out)
 
 	case r.Method == http.MethodGet && p == "/api/tree":
 		mu.Lock()

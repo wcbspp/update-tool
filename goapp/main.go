@@ -1118,55 +1118,6 @@ func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
 	return 0, false
 }
 
-var reJoinWord = regexp.MustCompile(`(?is)\b(join|straight_join)\b`)
-
-// 连接条件里出现函数（CONCAT 等）时，分片中间件无法把条件下推，
-// 会退化成 NestedLoopJoin(condition=true) 的笛卡尔积——这条估算没有意义，也不该等它。
-var reExprJoin = regexp.MustCompile(`(?is)(concat|ifnull|coalesce|date_format|date_sub|date_add|substr|substring|left|right|trim|lower|upper)\s*\(`)
-
-// approxRows：表行数的近似值（information_schema，不扫表）
-func approxRows(db *sql.DB, schema, table string) (int64, bool) {
-	var n int64
-	err := infQueryRow(db, `SELECT TABLE_ROWS FROM information_schema.TABLES
-		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) LIMIT 1`, schema, table).Scan(&n)
-	if err != nil {
-		return 0, false
-	}
-	return n, true
-}
-
-// reorderForCount：把逗号连接改写成「小表在前 + STRAIGHT_JOIN」。
-// 不这样写，优化器可能拿百万行的大表当驱动表，再逐行去扫批次表，
-// 一条 15 万行的 UPDATE 估算就要跑几分钟（生产上就是这样翻车的）。
-func reorderForCount(db *sql.DB, schema, tablesPart string) (string, bool) {
-	if reJoinWord.MatchString(tablesPart) {
-		return tablesPart, false // 已经写了 JOIN 语法，不擅自改顺序
-	}
-	parts := splitTopLevel(tablesPart)
-	if len(parts) < 2 {
-		return tablesPart, false
-	}
-	rows := make([]int64, len(parts))
-	for i, p := range parts {
-		t, _ := parseTableRef(strings.TrimSpace(p))
-		n, ok := approxRows(db, schema, mResolveTable(db, schema, t))
-		if !ok || n <= 0 {
-			return tablesPart, false // 行数未知或为 0 就不猜，避免把统计过期的大表排到最前
-		}
-		rows[i] = n
-	}
-	order := make([]int, len(parts))
-	for i := range order {
-		order[i] = i
-	}
-	sort.SliceStable(order, func(a, b int) bool { return rows[order[a]] < rows[order[b]] })
-	out := make([]string, 0, len(parts))
-	for _, i := range order {
-		out = append(out, strings.TrimSpace(parts[i]))
-	}
-	return strings.Join(out, " STRAIGHT_JOIN "), true
-}
-
 // countWhereBounded：按条件有界计数，最多数到 cap 行就停
 func countWhereBounded(db *sql.DB, from, where string, cap int64, pfSec int) (int64, bool, error) {
 	q := "SELECT COUNT(*) FROM (SELECT 1 FROM " + from
@@ -2172,25 +2123,15 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, st
 	}
 
 	where := whereRaw(st)
-	risky := reExprJoin.MatchString(where)
 
 	// 先做有界精确计数：最多数到 30 万行就停，不会因为表大而拖死。
-	// 连接顺序按表大小排好并加 STRAIGHT_JOIN，避免大表驱动导致全表扫描。
-	from := tablesPart
-	if v, ok := reorderForCount(db, schema, tablesPart); ok {
-		from = v
-	}
-	q := "SELECT COUNT(*) FROM (SELECT 1 FROM " + from
+	q := "SELECT COUNT(*) FROM (SELECT 1 FROM " + tablesPart
 	if where != "" {
 		q += " WHERE " + where
 	}
 	q += fmt.Sprintf(" LIMIT %d) x", capN+1)
 	var n int64
-	budget := pfSec
-	if risky && (budget <= 0 || budget > 3) {
-		budget = 3 // 函数连接条件：给 3 秒试一下，不行就明说数不出来
-	}
-	ctx, cancel := pfCtx(budget)
+	ctx, cancel := pfCtx(pfSec)
 	defer cancel()
 	if err := db.QueryRowContext(ctx, q).Scan(&n); err == nil {
 		if n > capN {
@@ -2199,10 +2140,6 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int) (int64, string, st
 		return n, "", explainIndexes(db, q), true
 	}
 
-	if risky {
-		// 计划多半是笛卡尔积，EXPLAIN 的数字也没意义，直接说明
-		return 0, "join_expr", "", true
-	}
 	// 数不出来（超时/太复杂）→ 用执行计划给个量级
 	if n2, ok := estimateByExplain(db, st, table, alias); ok {
 		return n2, "explain", "", true
@@ -2739,8 +2676,6 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					tail = " · 全表扫（表上有 " + strings.Join(names, "、") + "，数据少时可能不走）"
 				}
 				switch estNote {
-				case "join_expr":
-					addD(i, "warn", "预计影响行数未计算", "连接条件里有函数（CONCAT 之类），分片中间件无法下推，会退化成笛卡尔积；预检不再硬数，执行前请自行确认范围", estDur)
 				case "cap":
 					addD(i, "warn", "预计影响行数", fmt.Sprintf("≥ %d 行（数到 30 万就停了，实际可能更多）%s", estN, tail), estDur)
 				case "explain":

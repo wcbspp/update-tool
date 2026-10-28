@@ -1796,12 +1796,85 @@ func (p *pfConns) parallel(primary *sql.DB, fns ...func(*sql.DB)) {
 var reWhereWord = regexp.MustCompile(`(?is)\bwhere\b`)
 
 // 取最后一段顶层 WHERE 之后的条件
+// 只认顶层的 WHERE：子查询里的 WHERE、字符串里的 where 都不算
 func whereTail(st string) string {
-	loc := reWhereWord.FindAllStringIndex(st, -1)
-	if len(loc) == 0 {
+	rs := []rune(st)
+	depth := 0
+	inS, inD, inBt := false, false, false
+	last := -1
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		switch {
+		case inS:
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '\'' {
+				inS = false
+			}
+			continue
+		case inD:
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inD = false
+			}
+			continue
+		case inBt:
+			if c == '`' {
+				inBt = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inS = true
+		case '"':
+			inD = true
+		case '`':
+			inBt = true
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 && (c == 'w' || c == 'W') && i+5 <= len(rs) && strings.EqualFold(string(rs[i:i+5]), "where") {
+				prevOK := i == 0 || !isWordRune(rs[i-1])
+				nextOK := i+5 == len(rs) || !isWordRune(rs[i+5])
+				if prevOK && nextOK {
+					last = i + 5
+				}
+			}
+		}
+	}
+	if last < 0 {
 		return ""
 	}
-	return strings.TrimSpace(st[loc[len(loc)-1][1]:])
+	return strings.TrimSpace(string(rs[last:]))
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r > 127
+}
+
+var reDeleteLimit = regexp.MustCompile(`(?is)\blimit\s+(\d+)\s*;?\s*$`)
+
+// DELETE 自带的 LIMIT n（顶层，在语句末尾）
+func deleteLimit(st string) int64 {
+	m := reDeleteLimit.FindStringSubmatch(strings.TrimSpace(st))
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func whereOf(st string) string {
@@ -2095,27 +2168,46 @@ func validateText(raw string) []map[string]any {
 }
 
 // 检出库里已改数据但还没提交的事务——解释“我明明删了，工具还看得见”
-func trxWarnings(db *sql.DB, schema string) []map[string]any {
+func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 	out := make([]map[string]any, 0)
-	// 只看当前库的事务：INNODB_TRX 本身不带库名，借 PROCESSLIST 关联。
-	// 中间件上这两张表常被限制，查不到就静默跳过（这条只是提醒）。
-	rows, err := db.Query(`SELECT t.trx_id, DATE_FORMAT(t.trx_started,'%H:%i:%s'), t.trx_rows_modified
+	// 只看当前库的事务：INNODB_TRX 不带库名，借 PROCESSLIST 关联。
+	// p.db 为空（连库时没选默认库）的行也保留，并在文案里注明库未知，避免整类漏报。
+	ctx, cancel := pfCtx(pfSec)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, `SELECT t.trx_id, DATE_FORMAT(t.trx_started,'%H:%i:%s'), t.trx_rows_modified,
+			IFNULL(p.db,''), IFNULL(p.user,'')
 		FROM information_schema.INNODB_TRX t
-		JOIN information_schema.PROCESSLIST p ON p.id = t.trx_mysql_thread_id
-		WHERE t.trx_rows_modified > 0 AND (p.db = ? OR ? = '')`, schema, schema)
+		LEFT JOIN information_schema.PROCESSLIST p ON p.id = t.trx_mysql_thread_id
+		WHERE t.trx_rows_modified > 0 AND (p.db = ? OR p.db IS NULL OR ? = '')`, schema, schema)
 	if err != nil {
+		// 关联失败（中间件/权限）时至少报个数，别静默当没有
+		var n int
+		if e := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_rows_modified > 0`).Scan(&n); e == nil && n > 0 {
+			out = append(out, map[string]any{
+				"stmt": -1, "level": "warn", "title": "有未提交事务",
+				"detail": fmt.Sprintf("库里有 %d 个事务改了行还没提交，但读不到它属于哪个库；工具看到的可能是提交前的数据", n),
+			})
+		}
 		return out
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, started string
+		var id, started, dbName, user string
 		var n int64
-		if rows.Scan(&id, &started, &n) != nil {
+		if rows.Scan(&id, &started, &n, &dbName, &user) != nil {
 			continue
+		}
+		who := "会话"
+		if user != "" {
+			who = user
+		}
+		where := dbName
+		if where == "" {
+			where = "库未知"
 		}
 		out = append(out, map[string]any{
 			"stmt": -1, "level": "warn", "title": "有未提交事务",
-			"detail": "事务 " + id + " 已修改 " + strconv.FormatInt(n, 10) + " 行，开始于 " + started +
+			"detail": "事务 " + id + " 由 " + who + " 在 " + where + " 已修改 " + strconv.FormatInt(n, 10) + " 行，开始于 " + started +
 				"。如果这是你在客户端里的删改，记得 COMMIT；否则工具（另一个会话）看到的仍是提交前的数据",
 		})
 	}
@@ -2474,13 +2566,27 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			target := mResolveTable(db, schema, normTable(m[1]))
 			add(i, "ok", "被删除表", target)
 			targetUse[target] = append(targetUse[target], stmtTarget{stmt: i, where: whereRaw(st)})
+			lim := deleteLimit(st)
 			if !reWhereWord.MatchString(st) {
-				add(i, "warn", "没有 WHERE 条件", "这条 DELETE 会清空整张表，请确认不是笔误")
+				if lim > 0 {
+					add(i, "warn", "没有 WHERE 条件", fmt.Sprintf("这条 DELETE 没有 WHERE，按 LIMIT %d 最多删 %d 行，请确认不是笔误", lim, lim))
+				} else {
+					add(i, "warn", "没有 WHERE 条件", "这条 DELETE 会清空整张表，请确认不是笔误")
+				}
 			}
 			tDel := time.Now()
 			where := whereRaw(st)
 			if n, capped, err := countWhereBounded(db, qualTable(schema, target), where, 300000, pfSec); err == nil {
 				switch {
+				case lim > 0 && (capped || n <= lim):
+					// LIMIT 生效：实际删除量由它定
+					hit := lim
+					if !capped && n < lim {
+						hit = n
+					}
+					addD(i, "ok", "预计影响行数", fmt.Sprintf("预计删除 %d 行（LIMIT %d，精确计数）", hit, lim), time.Since(tDel))
+				case lim > 0:
+					addD(i, "warn", "预计影响行数", fmt.Sprintf("匹配 %d 行，本次只删 %d 行（LIMIT %d）", n, lim, lim), time.Since(tDel))
 				case capped:
 					addD(i, "warn", "预计影响行数", fmt.Sprintf("至少 %d 行（数到 30 万就停了，实际可能更多）", n), time.Since(tDel))
 				default:
@@ -2535,7 +2641,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		defer conns.give(c)
 		versions = versionReport(c, schema, batchTables, verColName, verPfxs)
 	}()
-	out = append(out, trxWarnings(db, schema)...)
+	out = append(out, trxWarnings(db, schema, pfSec)...)
 	vwg.Wait()
 	return out, versions, nil
 }

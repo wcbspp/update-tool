@@ -297,6 +297,20 @@ func TestPreflightDeleteExactCount(t *testing.T) {
 	}
 	defer db.Exec("DROP TABLE IF EXISTS pf_del")
 
+	// 带 LIMIT：实际只删 2 行，不能报 3 行
+	checksLim := runPf(t, ds, "DELETE FROM pf_del WHERE flag=1 LIMIT 2")
+	if !hasTitle(checksLim, "预计影响行数") {
+		t.Fatalf("应输出预计影响行数，实际: %v", titles(checksLim))
+	}
+	for _, c := range checksLim {
+		if s, _ := c["title"].(string); strings.Contains(s, "预计影响行数") {
+			d, _ := c["detail"].(string)
+			if !strings.Contains(d, "只删 2 行") || !strings.Contains(d, "LIMIT 2") {
+				t.Fatalf("LIMIT 2 应报只删 2 行，实际: %s", d)
+			}
+		}
+	}
+
 	checks := runPf(t, ds, "DELETE FROM pf_del WHERE flag=1")
 	found := false
 	for _, c := range checks {

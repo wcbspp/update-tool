@@ -3014,9 +3014,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPost && p == "/api/run":
 		var b struct {
-			ScriptID string `json:"scriptId"`
-			SQL      string `json:"sql"`
-			DryRun   *bool  `json:"dryRun"`
+			ScriptID string           `json:"scriptId"`
+			SQL      string           `json:"sql"`
+			DryRun   *bool            `json:"dryRun"`
+			Versions []map[string]any `json:"versions"`
 		}
 		if err := readJSON(r, &b); err != nil {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
@@ -3095,15 +3096,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if len([]rune(errShort)) > 600 {
 			errShort = string([]rune(errShort)[:600])
 		}
+		var totalAffected int64
+		for _, r := range results {
+			totalAffected += r.Affected
+		}
 		appendLog(map[string]any{
 			"ts": time.Now().Format(time.RFC3339), "script": sc.Name, "ds": ds.Name,
 			"dryRun": dry, "stmts": len(stmts), "database": ds.Database,
 			"ok": okRun, "ms": ms, "failedAt": failedAt, "error": errShort,
-			"previews": logPreviews,
+			"previews": logPreviews, "affected": totalAffected, "versions": b.Versions,
 		})
 		writeJSON(w, 200, map[string]any{
 			"ok": okRun, "ms": ms, "count": len(stmts), "failedAt": failedAt,
-			"previews": previews, "results": results, "error": errMsg,
+			"previews": previews, "results": results, "error": errMsg, "affected": totalAffected,
 		})
 
 	case r.Method == http.MethodGet && p == "/api/logs":

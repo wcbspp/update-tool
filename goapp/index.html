@@ -546,6 +546,10 @@
   .jline:not(.plain){cursor:pointer;color:#dbe9ff}
   .jline:not(.plain):hover{background:#152740}
   .jgo{margin-left:8px;font-size:11px;color:#7fb2ff;border:1px solid #2c4a72;border-radius:5px;padding:0 6px}
+  .upd-dot{display:none;width:7px;height:7px;border-radius:50%;background:#ff5d5d;
+    margin-left:6px;vertical-align:middle;box-shadow:0 0 0 2px rgba(255,93,93,.22)}
+  #verTag.has-upd{cursor:pointer}
+  #verTag.has-upd:hover{color:#fff}
 </style>
 </head>
 <body>
@@ -553,7 +557,7 @@
 <header>
   <div class="brand">
     <h1>update-tool</h1>
-    <span class="ver">v1.0.1 · 内部工具 · 创意 by 吴美丽</span>
+    <span class="ver" id="verTag" title="点击检查更新">v1.0.2 · 内部工具 · 创意 by 吴美丽<span class="upd-dot" id="updDot" style="display:none"></span></span>
   </div>
   <span class="who" id="who"></span>
   <span style="flex:1"></span>
@@ -1559,7 +1563,7 @@ async function run(dryRun) {
 
   showBusy('执行中…');
   try {
-    const r = await post('/api/run', { scriptId: CUR, sql: text, dryRun });
+    const r = await post('/api/run', { scriptId: CUR, sql: text, dryRun, versions: (pf && pf.versions) || [] });
     r.selOnly = info.selOnly;
     safeRender(() => renderRun(r, dryRun, warnN, (pf && pf.versions) || []));
     toast(r.ok ? '执行完成' : '执行失败，已回滚', r.ok ? 'ok' : 'bad');
@@ -1831,18 +1835,39 @@ function safeRender(fn) {
 }
 
 // 检查升级源里的 version.json，有新版本就显示下载入口
+let UPDATE_INFO = null;
+
 async function checkUpdate() {
   try {
     const r = await api('/api/update/check');
     if (!r || !r.enabled || !r.hasUpdate) return;
-    const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
-    const f = isMac ? (r.mac || r.win) : (r.win || r.mac);
-    const el = $('newver');
-    if (!el || !f) return;
-    el.textContent = '发现新版本 ' + r.latest + '，点这里下载';
-    el.onclick = () => window.open(r.base + f.url, '_blank');
-    el.style.display = 'flex';
+    UPDATE_INFO = r;
+    const dot = $('updDot');
+    if (dot) dot.style.display = 'inline-block';
+    const vt = $('verTag');
+    if (vt) { vt.classList.add('has-upd'); vt.title = '有新版本 ' + r.latest + '，点击查看'; }
   } catch (e) {}
+}
+
+// 点版本号：有更新弹说明与下载，无更新提示已是最新
+function openUpdate() {
+  const r = UPDATE_INFO;
+  if (!r) { toast('已是最新版本', 'ok'); return; }
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+  const f = isMac ? (r.mac || r.win) : (r.win || r.mac);
+  const dlg = $('dlg');
+  dlg.className = 'dlg';
+  dlg.innerHTML = `<h3>发现新版本 ${esc(r.latest || '')}</h3>
+    <div style="font-size:12.5px;color:#c2cfe1;line-height:1.9;margin-top:6px">
+      当前版本：${esc(r.current || '')}<br>
+      更新说明：${esc(r.notes || '—')}
+    </div>
+    <div class="foot"><span class="l"></span>
+      <button id="uCancel">关闭</button>
+      <button class="primary" id="uGo">下载 ${isMac ? 'macOS' : 'Windows'} 版</button></div>`;
+  $('mask').classList.add('on');
+  $('uCancel').onclick = () => $('mask').classList.remove('on');
+  $('uGo').onclick = () => { if (f) window.open(r.base + f.url, '_blank'); };
 }
 
 function bindStmtJump() {
@@ -1942,15 +1967,24 @@ function renderLogs() {
         <span class="s" title="${esc(l.script || '')}">${esc(l.script || '-')}</span>
         <span class="chip">${mode}</span>
         <span class="badge ${l.ok ? 'ok' : 'bad'}">${l.ok ? 'OK' : 'FAIL'}</span>
-        <span class="m">${l.ms || 0}ms · ${l.stmts || 0}条</span>
+        <span class="m">${l.ms || 0}ms · ${l.stmts || 0}条 · ${l.affected || 0}行</span>
+        ${logVersion(l) ? `<span class="chip">${esc(logVersion(l))}</span>` : ''}
       </div>
       <div class="ldet" id="ld${i}" style="display:none">${esc(logDetail(l))}</div>`;
   }).join('');
 }
+function logVersion(l) {
+  if (!Array.isArray(l.versions) || !l.versions.length) return '';
+  const v = l.versions[0] || {};
+  const vals = (v.ok || []).concat(v.other || []);
+  return vals.length ? vals.join('/') : '';
+}
+
 function logDetail(l) {
   const lines = [];
   lines.push(`数据源：${l.ds || '-'}    库：${l.database || '-'}`);
   lines.push(`时间：${l.ts}    模式：${l.dryRun ? '预演' : '执行'}    耗时：${l.ms}ms    语句：${l.stmts} 条`);
+  lines.push(`影响行数：${l.affected || 0}    数据版本：${logVersion(l) || '-'}`);
   if (l.failedAt != null && l.failedAt >= 0) lines.push(`失败位置：第 ${l.failedAt + 1} 条`);
   if (l.error) lines.push(`错误：${l.error}`);
   if (Array.isArray(l.previews) && l.previews.length) {
@@ -2015,10 +2049,16 @@ function initResizer() {
     try { if (localStorage.getItem('niuma_paused') === '1') toggleNiuma(); } catch (e) {}
     try { localStorage.removeItem('ui_zoom'); document.documentElement.style.removeProperty('--ui-zoom'); document.body.style.zoom = ''; } catch (e) {}
     let BOOTED_BUILD = '';
+    const vt = $('verTag');
+    if (vt) vt.onclick = () => openUpdate();
     setTimeout(() => { try { checkUpdate(); } catch (e) {} }, 1200);
     fetch('/api/health').then(r => r.json()).then(h => {
       if (!h || !h.build) return;
       BOOTED_BUILD = h.build;
+      const vtag = $('verTag');
+      if (vtag && h.version && vtag.firstChild) {
+        vtag.firstChild.nodeValue = 'v' + h.version + ' · 内部工具 · 创意 by 吴美丽';
+      }
     }).catch(() => {});
     setInterval(() => {
       if (!BOOTED_BUILD) return;

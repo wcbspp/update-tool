@@ -3251,6 +3251,8 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	type stmtTarget struct {
 		stmt  int
 		where string
+		alias string // 目标表在这条语句里的别名；空表示未知（DELETE 不填）
+		multi bool   // 多表写法（JOIN/USING）：WHERE 里的无限定列归属不明
 	}
 	targetUse := map[string][]stmtTarget{}
 
@@ -3481,7 +3483,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 						}
 					}
 					add(i, "ok", "被更新表", fmt.Sprintf("%s（单表更新）", r.table))
-					targetUse[r.table] = append(targetUse[r.table], stmtTarget{stmt: i, where: whereRaw(st)})
+					targetUse[r.table] = append(targetUse[r.table], stmtTarget{stmt: i, where: whereRaw(st), alias: r.alias})
 					if n, ok := estimateByExplain(db, st, r.table, r.alias); ok {
 						tail := " · 全表扫（数据量小时优化器会这样选，不代表缺索引）"
 						if keys := explainIndexes(db, st); keys != "" {
@@ -3546,7 +3548,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				if updated[strings.ToLower(ref.alias)] {
 					targetTable = ref.table
 					targetAlias = ref.alias
-					targetUse[ref.table] = append(targetUse[ref.table], stmtTarget{stmt: i, where: whereRaw(st)})
+					targetUse[ref.table] = append(targetUse[ref.table], stmtTarget{stmt: i, where: whereRaw(st), alias: targetAlias, multi: true})
 					break
 				}
 			}
@@ -3794,11 +3796,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 			parts = append(parts, fmt.Sprintf("第 %d 条 → %s", u.stmt+1, w))
 		}
-		wheres := make([]string, 0, len(uses))
+		targets := make([]overlapTarget, 0, len(uses))
 		for _, u := range uses {
-			wheres = append(wheres, u.where)
+			targets = append(targets, overlapTarget{where: u.where, alias: u.alias, multi: u.multi})
 		}
-		verdict, lvl := overlapVerdict(wheres)
+		verdict, lvl := overlapVerdict(targets)
 		add(-1, lvl, fmt.Sprintf("同一张表被 %d 条语句更新：%s", len(uses), verdict),
 			fmt.Sprintf("%s 出现在 %d 条语句里：\n%s\n结论：%s", t, len(uses), strings.Join(parts, "\n"), verdict))
 	}

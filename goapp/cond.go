@@ -400,24 +400,52 @@ func cstrOverlap(a, b cstr) bool {
 	return true
 }
 
-// condsOverlap: 两条 WHERE 是否存在同时成立的可能。
-// known=false 表示条件太复杂，解析不出来，不下结论。
-func condsOverlap(whereA, whereB string) (overlap, known bool) {
+// targetCols 只挑出属于目标表的列条件。
+// targetAlias 为空表示调用方不知道别名，退回旧行为（所有列都参与比较）。
+// ok=false 表示语句里有归属不明的列（多表语句中的无限定列），此时不猜。
+func targetCols(p parsedWhere, targetAlias string, multiStmt bool) (map[string][]cstr, bool) {
+	g := map[string][]cstr{}
+	if targetAlias == "" {
+		for k, v := range p.cols {
+			base, _ := splitAlias(k)
+			g[base] = append(g[base], v)
+		}
+		return g, true
+	}
+	// 语句里出现别的别名，或调用方已知这是多表语句 → 无限定列的归属不明
+	multi := multiStmt
+	for k := range p.cols {
+		if _, alias := splitAlias(k); alias != "" && !strings.EqualFold(alias, targetAlias) {
+			multi = true
+			break
+		}
+	}
+	for k, v := range p.cols {
+		base, alias := splitAlias(k)
+		switch {
+		case alias == "":
+			if multi {
+				return nil, false
+			}
+			g[base] = append(g[base], v)
+		case strings.EqualFold(alias, targetAlias):
+			g[base] = append(g[base], v)
+		}
+	}
+	return g, true
+}
+
+// condsOverlapOn: 两条 WHERE 是否可能改到同一行，只看目标表的条件。
+// 关联表的列不决定目标行，不参与比较；known=false 表示解析不出来，不下结论。
+func condsOverlapOn(whereA, aliasA string, multiA bool, whereB, aliasB string, multiB bool) (overlap, known bool) {
 	a, b := parseWhereStr(whereA), parseWhereStr(whereB)
 	if a.unknown || b.unknown || a.atoms == 0 || b.atoms == 0 {
 		return false, false
 	}
-	// 同一条语句里保留别名（a.CODE 与 b.CODE 是两个约束），
-	// 跨语句比较时别名没意义，按去掉别名的列名配对
-	groupA := map[string][]cstr{}
-	for k, v := range a.cols {
-		base, _ := splitAlias(k)
-		groupA[base] = append(groupA[base], v)
-	}
-	groupB := map[string][]cstr{}
-	for k, v := range b.cols {
-		base, _ := splitAlias(k)
-		groupB[base] = append(groupB[base], v)
+	groupA, okA := targetCols(a, aliasA, multiA)
+	groupB, okB := targetCols(b, aliasB, multiB)
+	if !okA || !okB {
+		return false, false
 	}
 	shared := 0
 	for base, cbs := range groupB {
@@ -426,7 +454,7 @@ func condsOverlap(whereA, whereB string) (overlap, known bool) {
 			continue
 		}
 		if len(cas) > 1 || len(cbs) > 1 {
-			return false, false // 同名列出现多次（多表别名），配不准，按未知处理
+			return false, false // 同一列出现多次，配不准，按未知处理
 		}
 		shared++
 		if !cstrOverlap(cas[0], cbs[0]) {
@@ -439,14 +467,28 @@ func condsOverlap(whereA, whereB string) (overlap, known bool) {
 	return true, true
 }
 
+// condsOverlap: 不知道目标表别名时的退化版本（所有列都参与比较）。
+func condsOverlap(whereA, whereB string) (overlap, known bool) {
+	return condsOverlapOn(whereA, "", false, whereB, "", false)
+}
+
+// overlapTarget: 同表的一条语句。alias 是目标表在这条语句里的别名，
+// 空表示调用方不知道（如 DELETE），行为与旧版一致。
+type overlapTarget struct {
+	where string
+	alias string
+	multi bool // 这条语句是多表写法：WHERE 里的无限定列可能属于关联表
+}
+
 // overlapVerdict: 同一张表被多条语句更新时的结论。
 // 任一对条件可能重叠 → 提示包含关系；全部可判定且不重叠 → 安全；
 // 有任何一对无法判定 → 标注需人工核对。
-func overlapVerdict(wheres []string) (verdict, level string) {
+func overlapVerdict(targets []overlapTarget) (verdict, level string) {
 	overlapN, unknownN := 0, 0
-	for i := 0; i < len(wheres); i++ {
-		for j := i + 1; j < len(wheres); j++ {
-			ov, known := condsOverlap(wheres[i], wheres[j])
+	for i := 0; i < len(targets); i++ {
+		for j := i + 1; j < len(targets); j++ {
+			ov, known := condsOverlapOn(targets[i].where, targets[i].alias, targets[i].multi,
+				targets[j].where, targets[j].alias, targets[j].multi)
 			switch {
 			case !known:
 				unknownN++

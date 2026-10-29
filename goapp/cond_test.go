@@ -34,18 +34,68 @@ func TestCondsOverlap(t *testing.T) {
 
 func TestOverlapVerdict(t *testing.T) {
 	cases := []struct {
-		name   string
-		wheres []string
-		level  string
+		name    string
+		targets []overlapTarget
+		level   string
 	}{
-		{"两条互斥", []string{"CODE='X'", "CODE='Y'"}, "ok"},
-		{"两条重叠", []string{"D>='2026-01-01'", "D>='2026-06-01'"}, "warn"},
-		{"无法判定", []string{"a.CODE=b.CODE", "CODE='X'"}, "warn"},
-		{"单条语句", []string{"CODE='X'"}, "ok"},
+		{"两条互斥", []overlapTarget{{where: "CODE='X'"}, {where: "CODE='Y'"}}, "ok"},
+		{"两条重叠", []overlapTarget{{where: "D>='2026-01-01'"}, {where: "D>='2026-06-01'"}}, "warn"},
+		{"无法判定", []overlapTarget{{where: "a.CODE=b.CODE"}, {where: "CODE='X'"}}, "warn"},
+		{"单条语句", []overlapTarget{{where: "CODE='X'"}}, "ok"},
+		// 已知别名：关联表的条件不决定目标行，不该把结论搅成「无法判定」
+		{"关联表条件不干扰", []overlapTarget{
+			{where: "h.CODE='X' AND p.KIND='1'", alias: "h", multi: true},
+			{where: "h.CODE='Y' AND p.KIND='2'", alias: "h", multi: true},
+		}, "ok"},
+		{"目标表条件仍能判重叠", []overlapTarget{
+			{where: "h.CODE='X' AND p.KIND='1'", alias: "h", multi: true},
+			{where: "h.CODE='X' AND p.KIND='2'", alias: "h", multi: true},
+		}, "warn"},
+		{"别名不同也按目标表列配对", []overlapTarget{
+			{where: "a.CODE='X'", alias: "a"},
+			{where: "b.CODE='Y'", alias: "b"},
+		}, "ok"},
+		{"多表语句里的无限定列不猜", []overlapTarget{
+			{where: "CODE='X' AND p.KIND='1'", alias: "h", multi: true},
+			{where: "CODE='Y'", alias: "h", multi: true},
+		}, "warn"},
+		{"多表语句全靠无限定列不判互斥", []overlapTarget{
+			{where: "POOLAREA_NO='1'", alias: "h", multi: true},
+			{where: "POOLAREA_NO='2'", alias: "h", multi: true},
+		}, "warn"},
+		{"单表语句无限定列照常判互斥", []overlapTarget{
+			{where: "POOLAREA_NO='1'", alias: "h"},
+			{where: "POOLAREA_NO='2'", alias: "h"},
+		}, "ok"},
 	}
 	for _, c := range cases {
-		if _, lvl := overlapVerdict(c.wheres); lvl != c.level {
+		if _, lvl := overlapVerdict(c.targets); lvl != c.level {
 			t.Errorf("%s: level=%s want %s", c.name, lvl, c.level)
+		}
+	}
+}
+
+func TestCondsOverlapOn(t *testing.T) {
+	cases := []struct {
+		name                 string
+		a, aliasA, b, aliasB string
+		multiA, multiB       bool
+		wantOverlap          bool
+		wantKnown            bool
+	}{
+		{"关联表条件不影响目标行判定", "h.CODE='X' AND p.K='1'", "h", "h.CODE='Y' AND p.K='2'", "h", true, true, false, true},
+		{"目标列相同仍重叠", "h.CODE='X' AND p.K='1'", "h", "h.CODE='X' AND p.K='2'", "h", true, true, true, true},
+		{"别名不同按列名配对", "a.CODE='X'", "a", "b.CODE='Y'", "b", false, false, false, true},
+		{"目标表没有可判定列", "h.DATE(d)='2026-01-01'", "h", "h.CODE='X'", "h", true, true, false, false},
+		{"多表语句无限定列不猜", "CODE='X' AND p.K='1'", "h", "CODE='Y'", "h", true, true, false, false},
+		{"单表无限定列正常判定", "CODE='X'", "h", "CODE='Y'", "h", false, false, false, true},
+		{"多表语句纯无限定列不猜", "POOLAREA_NO='1'", "h", "POOLAREA_NO='2'", "h", true, true, false, false},
+	}
+	for _, c := range cases {
+		ov, known := condsOverlapOn(c.a, c.aliasA, c.multiA, c.b, c.aliasB, c.multiB)
+		if known != c.wantKnown || (known && ov != c.wantOverlap) {
+			t.Errorf("%s: got overlap=%v known=%v, want overlap=%v known=%v",
+				c.name, ov, known, c.wantOverlap, c.wantKnown)
 		}
 	}
 }

@@ -454,11 +454,16 @@
   .crumb{color:#9dabbf}
   .crumb b{color:#ffffff}
   .ed{background:#04060a;border-color:#313d4f}
-  .hl{color:#f0f5fd}
-  .c{color:#8b98ab}
-  .k{color:#7fb2ff}
-  .s{color:#a9dc7a}
-  .n{color:#f2bb6a}
+  .hl{color:#c6d2e2}
+  .c{color:#7f8ba0}
+  .k{color:#6fa8ff}
+  .s{color:#9ed47a}
+  .n{color:#f0b46a}
+  .f{color:#62d3c8}
+  .tb{color:#e3a6ff}
+  .co{color:#8fd7e8}
+  .p{color:#5b6a80}
+  .hit{background:#2b4a72;color:#ffffff;border-radius:3px;box-shadow:0 0 0 1px #3c6ea8}
   .res{background:#070a10;border-color:#313d4f}
   .rhead{background:linear-gradient(180deg,#111a26,#0b1119);border-bottom-color:#39465b}
   .chk-t{color:#eef4fd}
@@ -735,26 +740,149 @@ function toast(t, kind = '') {
 const KW = new Set(('SELECT FROM WHERE UPDATE SET INSERT INTO VALUES DELETE JOIN LEFT RIGHT INNER OUTER CROSS ON AND OR NOT NULL IS IN LIKE BETWEEN AS GROUP BY ORDER LIMIT OFFSET DISTINCT CREATE TABLE ALTER DROP TRUNCATE BEGIN COMMIT ROLLBACK START TRANSACTION CASE WHEN THEN ELSE END UNION ALL EXISTS INTERVAL DAY HOUR MINUTE SECOND SHOW DATABASES EXPLAIN DESCRIBE DESC ASC HAVING WITH DUPLICATE KEY IGNORE REPLACE').split(' '));
 const FN = new Set(('COUNT SUM MAX MIN AVG NOW DATE_SUB DATE_ADD DATEDIFF TIMESTAMPDIFF CONCAT CONCAT_WS IFNULL IFNULL IF COALESCE SUBSTRING SUBSTR REPLACE TRIM LTRIM RTRIM CAST CONVERT GROUP_CONCAT CURDATE CURTIME CURRENT_DATE CURRENT_TIMESTAMP UNIX_TIMESTAMP FROM_UNIXTIME ABS ROUND CEIL FLOOR LENGTH CHAR_LENGTH UPPER LOWER LPAD RPAD DATE FORMAT STR_TO_DATE LAST_DAY').split(' '));
 
-function highlight(src) {
-  const re = /(--[^\n]*|\/\*[\s\S]*?\*\/)|('(?:''|[^'])*'|"(?:[^"\n])*"|`(?:[^`])*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_]*)/g;
-  let out = '', last = 0, m;
+function matchParen(toks, at) {
+  let d = 0;
+  for (let k = at; k < toks.length; k++) {
+    const tk = toks[k];
+    if (tk.t === 'p' && tk.s === '(') d++;
+    else if (tk.t === 'p' && tk.s === ')') { d--; if (!d) return k; }
+  }
+  return -1;
+}
+
+function tokenizeSQL(src) {
+  const re = /(--[^\n]*|\/\*[\s\S]*?\*\/)|('(?:''|[^'])*'|"(?:[^"\n])*"|`(?:[^`])*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_$]*)|([(),;])/g;
+  const out = []; let m;
   while ((m = re.exec(src))) {
-    out += esc(src.slice(last, m.index));
-    if (m[1]) out += `<span class="c">${esc(m[1])}</span>`;
-    else if (m[2]) out += `<span class="s">${esc(m[2])}</span>`;
-    else if (m[3]) out += `<span class="n">${esc(m[3])}</span>`;
-    else {
-      const w = m[4], up = w.toUpperCase();
-      out += KW.has(up) ? `<span class="k">${esc(w)}</span>` : (FN.has(up) ? `<span class="f">${esc(w)}</span>` : esc(w));
+    out.push({ t: m[1] ? 'c' : m[2] ? 's' : m[3] ? 'n' : m[4] ? 'w' : 'p', s: m[0], i: m.index, j: re.lastIndex });
+  }
+  return out;
+}
+
+// 找每条 INSERT 的表名、列清单、以及 VALUES 起始位置
+function insertStructures(toks) {
+  const list = [];
+  for (let n = 0; n < toks.length; n++) {
+    const tk = toks[n];
+    if (!(tk.t === 'w' && tk.s.toUpperCase() === 'INSERT')) continue;
+    let k = n + 1;
+    while (k < toks.length && !(toks[k].t === 'w' && toks[k].s.toUpperCase() === 'INTO')) {
+      if (toks[k].t === 'p' && toks[k].s === ';') break;
+      k++;
     }
-    last = re.lastIndex;
+    if (!(toks[k] && toks[k].s.toUpperCase() === 'INTO')) continue;
+    k++;
+    while (k < toks.length && toks[k].t !== 'w') k++;
+    if (!toks[k]) continue;
+    const table = k;
+    k++;
+    let p = k;
+    while (p < toks.length && toks[p].t !== 'p') p++;
+    let cols = [];
+    if (toks[p] && toks[p].s === '(') {
+      const close = matchParen(toks, p);
+      if (close > 0) {
+        let d = 0;
+        for (let x = p; x <= close; x++) {
+          const t2 = toks[x];
+          if (t2.t === 'p' && t2.s === '(') d++;
+          else if (t2.t === 'p' && t2.s === ')') d--;
+          else if (d === 1 && t2.t === 'w') cols.push(x);
+        }
+        k = close + 1;
+      }
+    }
+    list.push({ insert: n, table, cols, after: k });
+  }
+  return list;
+}
+
+// 光标落在某个 VALUES 元组里时，返回对应列名 token 与当前值 token
+function valueLink(toks, st, caret) {
+  let k = st.after, v = -1;
+  for (; k < toks.length; k++) {
+    const tk = toks[k];
+    if (tk.t === 'w' && tk.s.toUpperCase() === 'VALUES') { v = k; break; }
+    if (tk.t === 'w' && tk.s.toUpperCase() === 'INSERT') return null;
+    if (tk.t === 'p' && tk.s === ';') return null;
+  }
+  if (v < 0) return null;
+  for (k = v + 1; k < toks.length; k++) {
+    const tk = toks[k];
+    if (tk.t === 'p' && tk.s === ';') return null;
+    if (tk.t === 'w' && tk.s.toUpperCase() === 'INSERT') return null;
+    if (!(tk.t === 'p' && tk.s === '(')) continue;
+    const close = matchParen(toks, k);
+    if (close < 0) return null;
+    if (caret >= tk.i && caret <= toks[close].j) {
+      let d = 0, idx = 0;
+      for (let x = k; x <= close; x++) {
+        const t2 = toks[x];
+        if (t2.t === 'p' && t2.s === '(') d++;
+        else if (t2.t === 'p' && t2.s === ')') d--;
+        else if (d === 1 && t2.t === 'p' && t2.s === ',' && t2.i < caret) idx++;
+      }
+      if (idx >= st.cols.length) return null;
+      return { col: st.cols[idx] };
+    }
+    k = close;
+  }
+  return null;
+}
+
+function analyzeSQL(toks, caret) {
+  const cls = toks.map(tk => ({ c: 'c', s: 's', n: 'n', p: 'p' }[tk.t] || ''));
+  const hit = new Set();
+  let expectTable = false;
+  for (let n = 0; n < toks.length; n++) {
+    const tk = toks[n];
+    if (tk.t !== 'w') continue;
+    const up = tk.s.toUpperCase();
+    if (KW.has(up)) {
+      cls[n] = 'k';
+      expectTable = /^(INTO|FROM|UPDATE|JOIN|TABLE|USING)$/.test(up);
+      continue;
+    }
+    if (expectTable) { cls[n] = 'tb'; expectTable = false; continue; }
+    if (FN.has(up)) cls[n] = 'f';
+  }
+  const sts = insertStructures(toks);
+  for (const st of sts) {
+    for (const c of st.cols) cls[c] = 'co';
+  }
+  if (caret != null && caret >= 0) {
+    for (const st of sts) {
+      if (caret < toks[st.insert].i) continue;
+      const link = valueLink(toks, st, caret);
+      if (link) { hit.add(link.col); break; }
+    }
+  }
+  return { cls, hit };
+}
+
+function highlight(src, caret) {
+  const toks = tokenizeSQL(src);
+  const { cls, hit } = analyzeSQL(toks, caret);
+  let out = '', last = 0;
+  for (let n = 0; n < toks.length; n++) {
+    const tk = toks[n];
+    if (tk.i > last) out += esc(src.slice(last, tk.i));
+    const c = hit.has(n) ? 'hit' : cls[n];
+    out += c ? `<span class="${c}">${esc(tk.s)}</span>` : esc(tk.s);
+    last = tk.j;
   }
   return out + esc(src.slice(last));
 }
 
+let PAINT_SIG = '';
 function paint() {
   const ta = $('sql'), src = ta.value;
-  $('hl').innerHTML = highlight(src) + '\n';
+  const sig = src.length + '|' + ta.selectionStart + '|' + ta.selectionEnd;
+  if (sig !== PAINT_SIG || $('hl').dataset.empty === '1') {
+    PAINT_SIG = sig;
+    $('hl').dataset.empty = '0';
+    $('hl').innerHTML = highlight(src, ta.selectionStart) + '\n';
+  }
   const n = src.split('\n').length;
   let g = '';
   for (let i = 1; i <= n; i++) g += i + '\n';
@@ -2345,7 +2473,13 @@ function initResizer() {
   } catch (e) { toast('初始化失败：' + e.message, 'bad'); }
 })();
 
-$('sql').addEventListener('input', () => { dirty = true; paint(); $('btnUnfmt').style.display = 'none'; fmtPrev = null; });
+$('sql').addEventListener('input', () => { dirty = true; PAINT_SIG = ''; paint(); $('btnUnfmt').style.display = 'none'; fmtPrev = null; });
+['click', 'keyup', 'select', 'focus'].forEach(ev => $('sql').addEventListener(ev, () => paint()));
+$('sql').addEventListener('keydown', e => {
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
+    PAINT_SIG = '';
+  }
+});
 $('sql').addEventListener('scroll', syncScroll);
 $('sql').addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); preflight(); }

@@ -34,7 +34,7 @@
   .tree{flex:1;overflow:auto;padding:0 6px 12px}
   .tree::-webkit-scrollbar,.res::-webkit-scrollbar,.hl::-webkit-scrollbar,.edta::-webkit-scrollbar{width:9px;height:9px}
   .tree::-webkit-scrollbar-thumb,.res::-webkit-scrollbar-thumb{background:#2a3342;border-radius:6px}
-  .node{display:flex;align-items:center;gap:5px;height:27px;padding:0 6px;border-radius:5px;cursor:pointer;user-select:none}
+  .node{position:relative;display:flex;align-items:center;gap:5px;height:27px;padding:0 64px 0 6px;border-radius:5px;cursor:pointer;user-select:none}
   .node:hover{background:#1a2029}
   .node.sel{background:#182437;box-shadow:inset 2px 0 0 var(--acc)}
   .node .chev{width:11px;text-align:center;color:#5b6577;font-size:8px;flex:none;transition:transform .12s}
@@ -42,9 +42,16 @@
   .node .ico{width:13px;flex:none;text-align:center;font-size:11px;opacity:.7}
   .node .lbl{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}
   .node .sub{font-size:10px;color:#65707f;font-family:ui-monospace,Menlo,monospace;max-width:94px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .node .acts{display:none;gap:1px;flex:none}
-  .node:hover .acts{display:flex}
-  .node .acts button{background:none;border:none;color:#65707f;cursor:pointer;padding:0 2px;font-size:11.5px;line-height:1}
+  /* 操作按钮绝对定位：悬停时不挤动文字，避免鼠标刚移过去目标就跑 */
+  .node .acts{position:absolute;right:4px;top:50%;transform:translateY(-50%);
+    display:flex;gap:2px;opacity:0;pointer-events:none;transition:opacity .12s;
+    padding-left:18px;border-radius:6px;
+    background:linear-gradient(90deg,rgba(26,32,41,0),rgba(26,32,41,.96) 34%)}
+  .node:hover .acts,.node.sel .acts{opacity:1;pointer-events:auto}
+  .node .acts button{width:20px;height:20px;display:flex;align-items:center;justify-content:center;
+    background:none;border:1px solid transparent;border-radius:4px;color:#65707f;
+    cursor:pointer;font-size:12px;line-height:1}
+  .node .acts button:hover{color:var(--fg);background:#1c2330;border-color:var(--line2)}
   .node .acts button:hover{color:var(--fg)}
   .empty{padding:14px 12px;color:#65707f;font-size:12px;line-height:1.8}
   .sect{display:flex;align-items:center;gap:5px;padding:9px 6px 5px;font-size:10px;letter-spacing:.11em;color:#5f6a7d;text-transform:uppercase;cursor:pointer;user-select:none}
@@ -1139,6 +1146,8 @@ function row({ key, depth, chev, open, ico, label, sub, badge, envBadge, tip, ac
   </div>`;
 }
 
+let TREE_LOCK = 0;
+
 function bindTree() {
   $('tree').querySelectorAll('.node').forEach(el => {
     el.onclick = e => {
@@ -1149,8 +1158,16 @@ function bindTree() {
       else selectScript(id);
     };
   });
+  // 排序后列表会重排，光标原地不动就会落到相邻行上；锁 350ms，挡住这种“手滑第二下”
   $('tree').querySelectorAll('[data-act]').forEach(b => {
-    b.onclick = e => { e.stopPropagation(); const fn = window[b.dataset.act]; if (fn) fn(b.dataset.arg); };
+    b.onclick = e => {
+      e.stopPropagation();
+      if (Date.now() < TREE_LOCK) return;
+      const fn = window[b.dataset.act];
+      if (!fn) return;
+      if (b.dataset.act === 'actMove') TREE_LOCK = Date.now() + 350;
+      fn(b.dataset.arg);
+    };
   });
 }
 

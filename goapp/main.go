@@ -2740,7 +2740,13 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		_ = db.QueryRow("SELECT DATABASE()").Scan(&schema)
 	}
 	out := make([]map[string]any, 0)
+	// 记录每条语句是否真的产出过检查：UPDATE/DELETE 的检查是在循环之后
+	// 统一补的，不能用「循环内有没有 append」来判断是否覆盖
+	seen := make(map[int]bool, len(stmts))
 	add := func(i int, level, title, detail string) {
+		if i >= 0 {
+			seen[i] = true
+		}
 		out = append(out, map[string]any{"stmt": i, "level": level, "title": title, "detail": detail})
 	}
 	// 超过 300ms 的检查在详情里标出耗时，方便定位哪一步慢
@@ -2779,7 +2785,6 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	batchTables := make([]string, 0)
 	seenTable := map[string]bool{}
 	for i, st := range stmts {
-		checksBefore := len(out)
 		for _, m := range reBatch.FindAllStringSubmatch(st, -1) {
 			full := strings.ToLower(m[0])
 			if !seenTable[full] {
@@ -3114,10 +3119,6 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				delPending = append(delPending, delTask{i: i, stmt: st, table: countTable, where: where, lim: lim})
 			}
 		}
-		// 一条检查都没产生的语句（WITH …、REPLACE、SHOW 等）不能静默显示「预检通过」
-		if len(out) == checksBefore {
-			add(i, "warn", "预检未覆盖", fmt.Sprintf("这条语句（%s）工具暂时无法预检，请人工核对执行范围", stmtKind(st)))
-		}
 	}
 
 	// UPDATE 的估算与源表行数统一并发跑：脚本里多条 UPDATE 不再一条接一条等
@@ -3305,6 +3306,14 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	}()
 	out = append(out, trxWarnings(db, schema, pfSec)...)
 	vwg.Wait()
+	// 到这里 UPDATE/DELETE 的延迟检查也都产出了，再判断谁真的没被覆盖
+	for i, st := range stmts {
+		if seen[i] {
+			continue
+		}
+		add(i, "warn", "预检未覆盖",
+			fmt.Sprintf("这条语句（%s）工具暂时无法预检，请人工核对执行范围：%s", stmtKind(st), clipRunes(preview(st), 60)))
+	}
 	return out, versions, nil
 }
 

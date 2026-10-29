@@ -1,15 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#3b82f6"/>
-      <stop offset="1" stop-color="#1d4ed8"/>
+      <stop offset="0" stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#b45309"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
-  <g fill="#ffffff">
-    <path d="M162 214 C114 194 70 152 44 82 C102 96 160 140 196 188 Z"/>
-    <path d="M350 214 C398 194 442 152 468 82 C410 96 352 140 316 188 Z"/>
-    <path d="M100 512 C100 446 170 402 256 402 C342 402 412 446 412 512 Z"/>
-    <path d="M256 154 C322 154 362 210 364 284 C366 352 322 410 256 410 C190 410 146 352 148 284 C150 210 190 154 256 154 Z"/>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g fill="#fff7ed">
+    <!-- 粗短牛角：向外侧张开，不用鹿角那种细长上扬 -->
+    <path d="M178 210 C136 204 92 184 62 148 C96 138 146 152 190 182 Z"/>
+    <path d="M334 210 C376 204 420 184 450 148 C416 138 366 152 322 182 Z"/>
+    <!-- 头 -->
+    <path d="M256 168 C320 168 358 220 360 288 C362 354 320 408 256 408 C192 408 150 354 152 288 C154 220 192 168 256 168 Z"/>
+    <!-- 肩 -->
+    <path d="M118 512 C118 452 180 414 256 414 C332 414 394 452 394 512 Z"/>
   </g>
 </svg>

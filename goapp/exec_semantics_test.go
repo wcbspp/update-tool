@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,28 +53,9 @@ func rowsOf(t *testing.T, ds DataSource, q string) []string {
 		if v != nil {
 			s = *v
 		}
-		out = append(out, strings.Join([]string{itoa(id), s}, ":"))
+		out = append(out, strings.Join([]string{strconv.Itoa(id), s}, ":"))
 	}
 	return out
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	if neg {
-		return "-" + string(b)
-	}
-	return string(b)
 }
 
 // 与客户端一致：全部成功才落库，affected 是「真正改变的行数」

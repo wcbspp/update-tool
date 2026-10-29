@@ -2860,6 +2860,38 @@ func parseSetAssignments(rest string) ([]string, [][]string) {
 	return cols, [][]string{vals}
 }
 
+// INSERT ... SELECT 的源子句（从顶层 FROM 到末尾，去掉 ON DUPLICATE）
+func selectFromTail(sel string) string {
+	if k := indexTopLevelPhrase(sel, " from "); k >= 0 {
+		tail := strings.TrimSpace(sel[k:])
+		if j := indexTopLevelPhrase(tail, " on duplicate"); j >= 0 {
+			tail = strings.TrimSpace(tail[:j])
+		}
+		return tail
+	}
+	return ""
+}
+
+// 源子句带 JOIN/WHERE 时，按整段子查询计数才准
+func countSourceRows(db *sql.DB, fromTail string, capN int64, pfSec int) (int64, bool, error) {
+	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 %s LIMIT %d) x", fromTail, capN+1)
+	ctx, cancel := pfCtx(pfSec)
+	defer cancel()
+	var n int64
+	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
+		return 0, false, err
+	}
+	if n > capN {
+		return capN, true, nil
+	}
+	return n, false, nil
+}
+
+func sourceClauseIsComplex(tail string) bool {
+	up := strings.ToUpper(tail)
+	return strings.Contains(up, " JOIN ") || strings.Contains(up, " WHERE ")
+}
+
 func preflightInsertValues(db *sql.DB, schema string, i int, target, colList, rest string, pfSec int, tolerant bool, tolerantHow string, add func(int, string, string, string)) {
 	var tuples [][]string
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rest)), "set") {
@@ -3166,12 +3198,20 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				cntErr, dupErr, confErr     error
 				durCnt, durDup, durConf     time.Duration
 			)
+			srcTail := selectFromTail(m[3])
+			complexSrc := sourceClauseIsComplex(srcTail)
 			tasks := []func(*sql.DB){func(c *sql.DB) {
 				t0 := time.Now()
-				n, capped, cntErr = tableCountBounded(c, src, 300000, pfSec)
+				if srcTail != "" {
+					n, capped, cntErr = countSourceRows(c, srcTail, 300000, pfSec)
+				} else {
+					n, capped, cntErr = tableCountBounded(c, src, 300000, pfSec)
+				}
 				durCnt = time.Since(t0)
 			}}
-			if mapOK && len(pk) > 0 {
+			// 源子句带 JOIN/WHERE 时，判重得按子查询重算，代价高且容易算错，
+			// 这里明确跳过并告诉用户，而不是给出错的结论
+			if mapOK && len(pk) > 0 && !complexSrc {
 				srcCols := make([]string, 0, len(pk))
 				pairs := make([][2]string, 0, len(pk))
 				for _, c := range pk {
@@ -3190,6 +3230,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				})
 			}
 			conns.parallel(db, tasks...)
+			if complexSrc && mapOK && len(pk) > 0 {
+				add(i, "warn", "判重跳过", "源表带 JOIN 或 WHERE，判重需要按子查询重算，工具暂不自动判断；请确认这批是否已插入过")
+			}
 
 			switch {
 			case cntErr != nil:

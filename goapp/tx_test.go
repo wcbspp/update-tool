@@ -2,7 +2,9 @@ package main
 
 import (
 	"database/sql"
+	"net"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
@@ -27,24 +29,15 @@ func dsFromEnv(t *testing.T, env string) DataSource {
 }
 
 func splitHostPort(addr string) (string, int, bool) {
-	i := -1
-	for k := len(addr) - 1; k >= 0; k-- {
-		if addr[k] == ':' {
-			i = k
-			break
-		}
-	}
-	if i < 0 {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
 		return addr, 3306, false
 	}
-	p := 0
-	for k := i + 1; k < len(addr); k++ {
-		if addr[k] < '0' || addr[k] > '9' {
-			return addr, 3306, false
-		}
-		p = p*10 + int(addr[k]-'0')
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return host, 3306, false
 	}
-	return addr[:i], p, true
+	return host, port, true
 }
 
 func prepareTable(t *testing.T, ds DataSource) {

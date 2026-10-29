@@ -2654,30 +2654,65 @@ func validateText(raw string) []map[string]any {
 // engineWarnings 检查要写入的表是不是事务引擎。
 // MyISAM 之类的写入根本不进事务，ROLLBACK 会「成功」但数据已经落盘，
 // 此时界面说「已回滚」就是在骗人——必须提前拦住。
-func engineWarnings(db *sql.DB, schema string, tables []string, pfSec int) []map[string]any {
+// tableRef: 带库名的表引用。跨库写入（INSERT INTO otherdb.t）必须按它自己的库查引擎，
+// 否则会查错库：跨库的 MyISAM 漏报，同名 InnoDB 反倒误报。
+type tableRef struct{ schema, name string }
+
+// splitSchemaQualified: 把 `db`.`t` / db.t 拆成库名和表名；没有库名时 ok=false
+func splitSchemaQualified(raw string) (schema, table string, ok bool) {
+	s := strings.TrimSpace(strings.Trim(raw, "`"))
+	if i := strings.LastIndex(s, "."); i > 0 {
+		d := strings.Trim(strings.TrimSpace(s[:i]), "`")
+		t := strings.Trim(strings.TrimSpace(s[i+1:]), "`")
+		if d != "" && t != "" && t != "*" {
+			return d, t, true
+		}
+	}
+	return "", "", false
+}
+
+// engineWarnings: sure 是确定会被写入的表（非 InnoDB → error）；
+// unsure 是「分不清写哪张」时参与的表（非 InnoDB → 只提醒，不拦）。
+func engineWarnings(db *sql.DB, sure, unsure []tableRef, pfSec int) []map[string]any {
 	out := make([]map[string]any, 0)
-	if len(tables) == 0 {
+	if len(sure)+len(unsure) == 0 {
 		return out
 	}
 	ctx, cancel := pfCtx(pfSec)
 	defer cancel()
-	bad := make([]string, 0, len(tables))
-	for _, t := range tables {
-		var engine sql.NullString
-		err := db.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.TABLES
-			WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) LIMIT 1`, schema, t).Scan(&engine)
-		if err != nil || !engine.Valid || engine.String == "" {
-			continue // 查不到（中间件/权限/超时）时不要误报
+	badOf := func(list []tableRef) []string {
+		bad := make([]string, 0, len(list))
+		seen := map[string]bool{}
+		for _, r := range list {
+			k := strings.ToUpper(r.schema) + "." + strings.ToUpper(r.name)
+			if seen[k] {
+				continue // 同一条语句里多次出现同一张表，提示里只列一次
+			}
+			seen[k] = true
+			var engine sql.NullString
+			err := db.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.TABLES
+				WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) LIMIT 1`, r.schema, r.name).Scan(&engine)
+			if err != nil || !engine.Valid || engine.String == "" {
+				continue // 查不到（中间件/权限/超时）时不要误报
+			}
+			if !strings.EqualFold(engine.String, "InnoDB") {
+				bad = append(bad, r.name+"("+engine.String+")")
+			}
 		}
-		if !strings.EqualFold(engine.String, "InnoDB") {
-			bad = append(bad, t+"("+engine.String+")")
-		}
+		return bad
 	}
-	if len(bad) > 0 {
+	if bad := badOf(sure); len(bad) > 0 {
 		out = append(out, map[string]any{
 			"i": 0, "level": "error", "title": "目标表不是事务引擎",
 			"detail": "这些表写入后无法回滚：" + strings.Join(bad, "、") +
 				"。中途失败时前面的改动会留在库里，请先确认影响范围再执行，失败后不要直接重跑。",
+		})
+	}
+	if bad := badOf(unsure); len(bad) > 0 {
+		out = append(out, map[string]any{
+			"i": 0, "level": "warn", "title": "有表没能确定是否会被写",
+			"detail": "这条语句的更新目标分不清（SET 没写别名、列名也对不上归属），参与的表里这些不是事务引擎：" +
+				strings.Join(bad, "、") + "。如果实际写到它们，中途失败无法回滚，请自行确认。",
 		})
 	}
 	return out
@@ -3312,6 +3347,23 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 
 	batchTables := make([]string, 0)
 	seenTable := map[string]bool{}
+	// 真正会被写入的表（含 INSERT 目标）。非事务引擎的检查要看它们，
+	// 只看批次表会漏掉「往 MyISAM 表里插数据」这类回滚保不住的情况。
+	writeRefs := make([]tableRef, 0)
+	seenWrite := map[string]bool{}
+	noteWrite := func(sch, name string) {
+		if name == "" {
+			return
+		}
+		k := strings.ToLower(sch) + "\x00" + strings.ToLower(name)
+		if seenWrite[k] {
+			return
+		}
+		seenWrite[k] = true
+		writeRefs = append(writeRefs, tableRef{sch, name})
+	}
+	// 目标表定位不到的 UPDATE：把参与的表按「可能被写」检查，只给提醒不直接拦
+	unsureRefs := make([]tableRef, 0)
 	for i, stRaw := range stmts {
 		st := stripCTE(stRaw)
 		ctes := cteNames(stRaw)
@@ -3333,8 +3385,14 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			if m == nil {
 				continue
 			}
-			target := mResolveTable(db, schema, normTable(m[1]))
+			tgtRaw := strings.TrimSpace(m[1])
+			tgtSchema, tgtName := schema, normTable(tgtRaw)
+			if sc, nm, ok := splitSchemaQualified(tgtRaw); ok {
+				tgtSchema, tgtName = sc, normTable(nm)
+			}
+			target := mResolveTable(db, tgtSchema, tgtName)
 			colList := strings.TrimSpace(m[2])
+			noteWrite(tgtSchema, target)
 			add(i, "ok", "目标表", target)
 			fm := reFrom.FindStringSubmatch(m[3])
 			if fm == nil || strings.HasPrefix(strings.ToLower(strings.TrimSpace(m[3])), "set") {
@@ -3585,6 +3643,13 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					targetAlias = ref.alias
 					targetUse[ref.table] = append(targetUse[ref.table], stmtTarget{stmt: i, where: whereRaw(st), alias: targetAlias, multi: true})
 					break
+				}
+			}
+			if targetTable == "" {
+				// SET 没写别名、列名也没法归属：分不清写哪张表，
+				// 只能把参与的表都当「可能被写」，交给引擎检查降级提醒
+				for _, ref := range refs {
+					unsureRefs = append(unsureRefs, tableRef{schema, ref.table})
 				}
 			}
 			// 行数估算与各源表行数互不依赖，收集起来和整段脚本的其它语句一起并发跑
@@ -3861,7 +3926,10 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		defer conns.give(c)
 		versions = versionReport(c, schema, batchTables, verColName, verPfxs, pfSec)
 	}()
-	out = append(out, engineWarnings(db, schema, batchTables, pfSec)...)
+	for t := range targetUse {
+		noteWrite(schema, t)
+	}
+	out = append(out, engineWarnings(db, writeRefs, unsureRefs, pfSec)...)
 	out = append(out, trxWarnings(db, schema, pfSec)...)
 	vwg.Wait()
 	// 到这里 UPDATE/DELETE 的延迟检查也都产出了，再判断谁真的没被覆盖
@@ -4508,7 +4576,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if restart {
 			go func() {
 				time.Sleep(500 * time.Millisecond)
-				restartSelf()
+				restartSelfHook()
 			}()
 		}
 
@@ -5573,6 +5641,10 @@ func ensureInstance(port string) bool {
 }
 
 // restartSelf：起一个新进程接管，然后自己退出
+// 测试里替换成空函数：切监听范围的用例会走到这里，
+// 但测试进程不该真的再拉一个自己起来。
+var restartSelfHook = restartSelf
+
 func restartSelf() {
 	exe, err := os.Executable()
 	if err != nil {

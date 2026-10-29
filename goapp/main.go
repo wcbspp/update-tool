@@ -1479,45 +1479,45 @@ func keyCols(db *sql.DB, schema, t string) ([]string, string) {
 }
 
 // 兜底：SHOW INDEX 直接读表，兼容性比 information_schema 好
-func keyColsViaShowIndex(db *sql.DB, schema, t string) ([]string, string) {
+
+// SHOW INDEX 的统一解析：中间件限制 information_schema 时两个调用点共用
+type showIdxRow struct {
+	name, col             string
+	nonUniq, hasNonUniq   bool
+	nullable, hasNullable bool
+}
+
+func showIndexRows(db *sql.DB, schema, t string) ([]showIdxRow, bool) {
 	qualified := quoteIdent(t)
 	if schema != "" {
 		qualified = quoteIdent(schema) + "." + qualified
 	}
 	rows, err := db.Query("SHOW INDEX FROM " + qualified)
 	if err != nil {
-		return nil, ""
+		return nil, false
 	}
 	defer rows.Close()
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, ""
+		return nil, false
 	}
-	idxName, idxCol, idxSeq, idxNonUniq, idxNull := -1, -1, -1, -1, -1
+	iName, iCol, iNonUniq, iNull := -1, -1, -1, -1
 	for i, c := range cols {
 		switch strings.ToLower(c) {
 		case "key_name":
-			idxName = i
+			iName = i
 		case "column_name":
-			idxCol = i
-		case "seq_in_index":
-			idxSeq = i
+			iCol = i
 		case "non_unique":
-			idxNonUniq = i
+			iNonUniq = i
 		case "null":
-			idxNull = i
+			iNull = i
 		}
 	}
-	if idxName < 0 || idxCol < 0 || idxSeq < 0 {
-		return nil, ""
+	if iName < 0 || iCol < 0 {
+		return nil, false
 	}
-
-	type item struct {
-		name     string
-		cols     []string
-		nullable bool
-	}
-	var got []item
+	var got []showIdxRow
 	for rows.Next() {
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -1531,31 +1531,52 @@ func keyColsViaShowIndex(db *sql.DB, schema, t string) ([]string, string) {
 			if i < 0 || i >= len(vals) {
 				return ""
 			}
-			switch v := vals[i].(type) {
-			case []byte:
-				return string(v)
-			default:
-				return fmt.Sprintf("%v", v)
+			if b, ok := vals[i].([]byte); ok {
+				return string(b)
 			}
+			return fmt.Sprintf("%v", vals[i])
 		}
-		if idxNonUniq >= 0 && cell(idxNonUniq) != "0" {
-			continue // 只要唯一索引
+		r := showIdxRow{name: cell(iName), col: cell(iCol)}
+		if iNonUniq >= 0 {
+			r.hasNonUniq = true
+			r.nonUniq = cell(iNonUniq) != "0"
 		}
-		nm := cell(idxName)
-		col := cell(idxCol)
-		if nm == "" || col == "" {
+		if iNull >= 0 {
+			r.hasNullable = true
+			r.nullable = strings.EqualFold(cell(iNull), "YES")
+		}
+		if r.name == "" || r.col == "" {
 			continue
 		}
-		if len(got) == 0 || got[len(got)-1].name != nm {
-			got = append(got, item{name: nm})
+		got = append(got, r)
+	}
+	return got, true
+}
+
+func keyColsViaShowIndex(db *sql.DB, schema, t string) ([]string, string) {
+	rows, ok := showIndexRows(db, schema, t)
+	if !ok {
+		return nil, ""
+	}
+	type item struct {
+		name     string
+		cols     []string
+		nullable bool
+	}
+	var got []item
+	for _, r := range rows {
+		if r.hasNonUniq && r.nonUniq {
+			continue // 只要唯一索引
+		}
+		if len(got) == 0 || got[len(got)-1].name != r.name {
+			got = append(got, item{name: r.name})
 		}
 		it := &got[len(got)-1]
-		it.cols = append(it.cols, col)
-		if idxNull >= 0 && strings.EqualFold(cell(idxNull), "YES") {
+		it.cols = append(it.cols, r.col)
+		if r.hasNullable && r.nullable {
 			it.nullable = true
 		}
 	}
-
 	for _, it := range got {
 		if strings.EqualFold(it.name, "PRIMARY") {
 			return it.cols, it.name
@@ -1572,7 +1593,6 @@ func keyColsViaShowIndex(db *sql.DB, schema, t string) ([]string, string) {
 	return nil, ""
 }
 
-// indexesOf: 取表上全部索引（含非唯一），保持出现顺序。优先 information_schema，失败退回 SHOW INDEX。
 func indexesOf(db *sql.DB, schema, t string) (map[string][]string, []string) {
 	out := map[string][]string{}
 	var order []string
@@ -1598,61 +1618,12 @@ func indexesOf(db *sql.DB, schema, t string) (map[string][]string, []string) {
 		}
 	}
 	// 中间件限制 information_schema 时的兜底
-	qualified := quoteIdent(t)
-	if schema != "" {
-		qualified = quoteIdent(schema) + "." + qualified
-	}
-	srows, err := db.Query("SHOW INDEX FROM " + qualified)
-	if err != nil {
+	rows2, ok := showIndexRows(db, schema, t)
+	if !ok {
 		return out, order
 	}
-	defer srows.Close()
-	cols, err := srows.Columns()
-	if err != nil {
-		return out, order
-	}
-	iName, iCol := -1, -1
-	for i, c := range cols {
-		switch strings.ToLower(c) {
-		case "key_name":
-			iName = i
-		case "column_name":
-			iCol = i
-		}
-	}
-	if iName < 0 || iCol < 0 {
-		return out, order
-	}
-	type rowT struct {
-		name, col string
-		seq       int
-	}
-	var got []rowT
-	for srows.Next() {
-		vals := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if srows.Scan(ptrs...) != nil {
-			continue
-		}
-		cell := func(i int) string {
-			if i < 0 || i >= len(vals) {
-				return ""
-			}
-			if b, ok := vals[i].([]byte); ok {
-				return string(b)
-			}
-			return fmt.Sprintf("%v", vals[i])
-		}
-		got = append(got, rowT{cell(iName), cell(iCol), len(got)})
-	}
-	for _, r := range got {
-		if r.name == "" || r.col == "" {
-			continue
-		}
-		if _, ok := out[r.name]; !ok {
+	for _, r := range rows2 {
+		if _, exists := out[r.name]; !exists {
 			order = append(order, r.name)
 		}
 		out[r.name] = append(out[r.name], r.col)
@@ -3233,6 +3204,21 @@ var (
 	updCache map[string]any
 )
 
+// 升级源地址：老安装里存的是 dl.example.com，统一改指对象存储；
+// 没配过的也走这个默认值，不再「静默不检查更新」。
+const (
+	legacyUpdateURL  = "dl.example.com"
+	defaultUpdateURL = "https://oss-api.example.com/medupdate-tool/"
+)
+
+func effectiveUpdateURL(raw string) string {
+	u := strings.TrimSpace(raw)
+	if u == "" || strings.Contains(u, legacyUpdateURL) {
+		return defaultUpdateURL
+	}
+	return u
+}
+
 func fetchVersion(base string, fresh bool) (map[string]any, error) {
 	updMu.Lock()
 	defer updMu.Unlock()
@@ -3787,11 +3773,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		st := loadStore()
 		mu.Unlock()
-		base := strings.TrimSpace(st.Settings.UpdateURL)
-		if base == "" {
-			writeJSON(w, 200, map[string]any{"enabled": false})
-			return
-		}
+		base := effectiveUpdateURL(st.Settings.UpdateURL)
 		if !strings.HasSuffix(base, "/") {
 			base += "/"
 		}

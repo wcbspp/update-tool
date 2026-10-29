@@ -81,3 +81,19 @@ func TestHostAllowList(t *testing.T) {
 		t.Fatal("外部 Host 必须挡住")
 	}
 }
+
+// 老的 dl 地址必须自动改指对象存储；没配过也用默认值（不再静默不检查更新）
+func TestEffectiveUpdateURL(t *testing.T) {
+	cases := map[string]string{
+		"":                                  defaultUpdateURL,
+		"https://dl.example.com/":           defaultUpdateURL,
+		"http://dl.example.com":             defaultUpdateURL,
+		"https://oss-api.example.com/x/":    "https://oss-api.example.com/x/",
+		"https://self.example.com/updates/": "https://self.example.com/updates/",
+	}
+	for in, want := range cases {
+		if got := effectiveUpdateURL(in); got != want {
+			t.Fatalf("%q → %q，期望 %q", in, got, want)
+		}
+	}
+}

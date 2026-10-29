@@ -1018,6 +1018,18 @@ let BUSY = '';
 let ACT_SEQ = 0;
 const BUSY_TEXT = { run: '执行', preflight: '预检', check: '语法校验', save: '保存' };
 
+// 编辑态保护：正在改的脚本不能被删掉（不管改没改过）
+function editingGuarded(id, what) {
+  if (!EDIT_MODE || CUR !== id) return false;
+  toast(`「${what || '这个脚本'}」正在编辑，先保存或退出编辑再删`, 'bad');
+  return true;
+}
+function groupScriptIds(g) {
+  const out = [];
+  for (const sc of (g.scripts || [])) out.push(sc.id);
+  for (const f of (g.folders || [])) out.push(...groupScriptIds(f));
+  return out;
+}
 function busyBlocked() {
   if (!BUSY) return false;
   toast(BUSY === 'run' || BUSY === 'preflight' ? '执行/预检进行中，先等它结束'
@@ -1700,9 +1712,14 @@ function rowMenu(key) {
   // 执行 / 预检进行中时，结构性操作先置灰，等它结束
   const MUTATE = new Set(['delScript', 'delGroup', 'delDs', 'editDs', 'editScript', 'editGroup',
     'actMove', 'actAddGroup', 'actAddScript', 'actAddRootScript']);
+  const editingKey = (EDIT_MODE && CUR) ? 's' + CUR : '';
   m.innerHTML = items.map(a => {
-    const off = !!BUSY && MUTATE.has(a[1]);
-    return `<button data-fn="${a[1]}" data-arg="${a[2]}"${off ? ' disabled title="执行/预检进行中，先等它结束"' : ''}>${esc(a[3])}</button>`;
+    let off = !!BUSY && MUTATE.has(a[1]);
+    let why = '执行/预检进行中，先等它结束';
+    if (a[1] === 'delScript' && editingKey && a[2] === editingKey) {
+      off = true; why = '正在编辑这个脚本，先保存或退出编辑';
+    }
+    return `<button data-fn="${a[1]}" data-arg="${a[2]}"${off ? ` disabled title="${why}"` : ''}>${esc(a[3])}</button>`;
   }).join('');
   document.body.appendChild(m);
   const r = nodeEl.getBoundingClientRect();
@@ -1955,6 +1972,10 @@ async function delGroup(key) {
   if (busyBlocked()) return;
   const g = IDX.g[key.slice(1)];
   if (!g) return;
+  if (EDIT_MODE && CUR && groupScriptIds(g).includes(CUR)) {
+    toast('这个文件夹里有正在编辑的脚本，先保存或退出编辑再删', 'bad');
+    return;
+  }
   if (!confirm(`删除文件夹「${g.name}」及其下所有子文件夹和脚本？`)) return;
   await del('/api/group?id=' + g.id);
   await loadTree(); toast('已删除', 'ok');
@@ -1980,6 +2001,7 @@ async function delScript(key) {
   if (busyBlocked()) return;
   const sc = IDX.s[key.slice(1)];
   if (!sc) return;
+  if (editingGuarded(sc.id, sc.name)) return;
   if (!confirm(`删除脚本「${sc.name}」？`)) return;
   await del('/api/script?id=' + sc.id);
   if (CUR === sc.id) clearEditor();

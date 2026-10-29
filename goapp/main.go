@@ -918,14 +918,19 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 	}
 
 	fail := func(i int, e error) (map[string]stmtResult, int, string, int64) {
-		_ = tx.Rollback()
+		rbErr := tx.Rollback()
 		// 整批已回滚：前面语句的“变更行数”不能留在结果和合计里
 		for k, r := range res {
 			r.Affected = 0
 			r.RolledBack = true
 			res[k] = r
 		}
-		return res, i, withHint(e.Error()), time.Since(start).Milliseconds()
+		msg := withHint(e.Error())
+		// 回滚本身失败时，绝不能告诉用户「已回滚」——那会让人放心重跑，数据被改两遍
+		if rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			msg = "回滚可能未完成（" + rbErr.Error() + "）。请先人工核对前 " + strconv.Itoa(i) + " 条语句的影响，不要直接重跑。原始错误：" + msg
+		}
+		return res, i, msg, time.Since(start).Milliseconds()
 	}
 
 	for i, st := range stmts {
@@ -2063,8 +2068,73 @@ func isWordRune(r rune) bool {
 var reDeleteLimit = regexp.MustCompile(`(?is)\blimit\s+(\d+)\s*;?\s*$`)
 
 // DELETE 自带的 LIMIT n（顶层，在语句末尾）
+// stripSQLComments 去掉 -- / # / /* */ 注释，只用于关键字判断
+func stripSQLComments(st string) string {
+	var b strings.Builder
+	rs := []rune(st)
+	inS, inD := false, false
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		switch {
+		case inS:
+			b.WriteRune(c)
+			if c == '\\' && i+1 < len(rs) {
+				i++
+				b.WriteRune(rs[i])
+			} else if c == '\'' {
+				inS = false
+			}
+			continue
+		case inD:
+			b.WriteRune(c)
+			if c == '\\' && i+1 < len(rs) {
+				i++
+				b.WriteRune(rs[i])
+			} else if c == '"' {
+				inD = false
+			}
+			continue
+		}
+		if c == '\'' {
+			inS = true
+			b.WriteRune(c)
+			continue
+		}
+		if c == '"' {
+			inD = true
+			b.WriteRune(c)
+			continue
+		}
+		if c == '-' && i+1 < len(rs) && rs[i+1] == '-' {
+			for i < len(rs) && rs[i] != '\n' {
+				i++
+			}
+			b.WriteRune(' ')
+			continue
+		}
+		if c == '#' {
+			for i < len(rs) && rs[i] != '\n' {
+				i++
+			}
+			b.WriteRune(' ')
+			continue
+		}
+		if c == '/' && i+1 < len(rs) && rs[i+1] == '*' {
+			i += 2
+			for i+1 < len(rs) && !(rs[i] == '*' && rs[i+1] == '/') {
+				i++
+			}
+			i++
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
 func deleteLimit(st string) int64 {
-	m := reDeleteLimit.FindStringSubmatch(strings.TrimSpace(st))
+	m := reDeleteLimit.FindStringSubmatch(strings.TrimSpace(stripSQLComments(st)))
 	if m == nil {
 		return 0
 	}
@@ -2546,6 +2616,38 @@ func validateText(raw string) []map[string]any {
 }
 
 // 检出库里已改数据但还没提交的事务——解释“我明明删了，工具还看得见”
+// engineWarnings 检查要写入的表是不是事务引擎。
+// MyISAM 之类的写入根本不进事务，ROLLBACK 会「成功」但数据已经落盘，
+// 此时界面说「已回滚」就是在骗人——必须提前拦住。
+func engineWarnings(db *sql.DB, schema string, tables []string, pfSec int) []map[string]any {
+	out := make([]map[string]any, 0)
+	if len(tables) == 0 {
+		return out
+	}
+	ctx, cancel := pfCtx(pfSec)
+	defer cancel()
+	bad := make([]string, 0, len(tables))
+	for _, t := range tables {
+		var engine sql.NullString
+		err := db.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.TABLES
+			WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) LIMIT 1`, schema, t).Scan(&engine)
+		if err != nil || !engine.Valid || engine.String == "" {
+			continue // 查不到（中间件/权限/超时）时不要误报
+		}
+		if !strings.EqualFold(engine.String, "InnoDB") {
+			bad = append(bad, t+"("+engine.String+")")
+		}
+	}
+	if len(bad) > 0 {
+		out = append(out, map[string]any{
+			"i": 0, "level": "error", "title": "目标表不是事务引擎",
+			"detail": "这些表写入后无法回滚：" + strings.Join(bad, "、") +
+				"。中途失败时前面的改动会留在库里，请先确认影响范围再执行，失败后不要直接重跑。",
+		})
+	}
+	return out
+}
+
 func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 	out := make([]map[string]any, 0)
 	// 只看当前库的事务：INNODB_TRX 不带库名，借 PROCESSLIST 关联。
@@ -3387,7 +3489,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 						} else if names := mIndexNames(db, schema, r.table); len(names) > 0 {
 							tail = " · 全表扫（表上有 " + strings.Join(names, "、") + "，数据少时可能不走）"
 						}
-						add(i, "ok", "预计影响行数", fmt.Sprintf("预计更新 %d 行（按执行计划估算）%s", n, tail))
+						add(i, "warn", "预计影响行数", fmt.Sprintf("约 %d 行（执行计划扫描行数估算，可能远大于实际命中；精确值需 COUNT）%s", n, tail))
 					} else {
 						add(i, "warn", "预计影响行数未计算", "查询超时或语句太复杂（大表上常见），不影响执行")
 					}
@@ -3719,6 +3821,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		defer conns.give(c)
 		versions = versionReport(c, schema, batchTables, verColName, verPfxs, pfSec)
 	}()
+	out = append(out, engineWarnings(db, schema, batchTables, pfSec)...)
 	out = append(out, trxWarnings(db, schema, pfSec)...)
 	vwg.Wait()
 	// 到这里 UPDATE/DELETE 的延迟检查也都产出了，再判断谁真的没被覆盖
@@ -4101,9 +4204,11 @@ func findUnsafeStatement(stmts []string) (int, string, bool) {
 		plain := reDeleteMods.ReplaceAllString(st, "delete ")
 		kind := stmtKind(plain)
 		if kind == "update" {
-			// 与 DELETE 同一套判断：没 WHERE、没 LIMIT 的 UPDATE 会把整表改掉
-			if whereTail(plain) == "" && deleteLimit(plain) == 0 {
-				return idx + 1, "确实要全表更新请写成 WHERE 1=1", true
+			// 多表 UPDATE 用 JOIN ... ON 限定行，没有顶层 WHERE 不等于整表改写
+			bare := strings.ToUpper(stripSQLComments(plain))
+			limited := strings.Contains(bare, " JOIN ") || deleteLimit(plain) > 0
+			if whereTail(plain) == "" && !limited {
+				return idx + 1, "这条 UPDATE 没识别到 WHERE 条件；如果确实要改全表，请写成 WHERE 1=1 明确表达", true
 			}
 			continue
 		}
@@ -4122,6 +4227,37 @@ func findUnsafeStatement(stmts []string) (int, string, bool) {
 		return idx + 1, hint, true
 	}
 	return 0, "", false
+}
+
+// isLoopbackReq 判断请求是否来自本机
+func isLoopbackReq(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	// 从本机用局域网地址打开（http://127.0.0.1:8787）也算本机
+	for _, own := range lanIPs() {
+		if own == host {
+			return true
+		}
+	}
+	return false
+}
+
+// sensitiveOpenToAll 未设 ACCESS_KEY 时，这些端点不应让局域网随便调
+func sensitiveEndpoint(p string) bool {
+	switch p {
+	case "/api/tree", "/api/logs", "/api/ds/test", "/api/run", "/api/preflight", "/api/order", "/api/group", "/api/script", "/api/ds", "/api/settings", "/api/shutdown":
+		return true
+	}
+	return false
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -4159,7 +4295,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		full := filepath.Join(appHome, rel)
-		if _, err := os.Stat(full); err != nil {
+		// 用 Lstat：dist 里放一个名字合规的软链就能绕过白名单读到 data.json
+		if fi, err := os.Lstat(full); err != nil || !fi.Mode().IsRegular() {
 			http.Error(w, "安装包还没生成，先在服务器上执行 build.sh", 404)
 			return
 		}
@@ -4585,6 +4722,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		for _, d := range s.DataSources {
 			if d.ID == b.ID {
 				saved = d
+			}
+		}
+		// 允许在表单里临时改 host/port，但没设访问密钥时不能拿它探任意地址
+		if (os.Getenv("ACCESS_KEY") == "" || os.Getenv("ACCESS_KEY") == "off") && b.Host != nil {
+			if *b.Host != saved.Host || (b.Port != nil && int(*b.Port) != saved.Port) {
+				writeJSON(w, 403, map[string]any{"ok": false, "error": "未设置访问密钥时只能测试已保存的数据源"})
+				return
 			}
 		}
 		ds := DataSource{Host: saved.Host, Port: saved.Port, User: saved.User, Database: saved.Database, Pass: saved.Pass}
@@ -5409,6 +5553,19 @@ func main() {
 		}
 		base.ServeHTTP(w, r)
 	})
+	if key := os.Getenv("ACCESS_KEY"); key == "" || key == "off" {
+		// 没设访问密钥时，局域网来的请求一律碰不到能改数据或读资产/日志的接口。
+		// 否则同一网段任何人都能读数据源清单、拿日志里的业务数据、拿这个工具当端口扫描器。
+		inner := h
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if sensitiveEndpoint(r.URL.Path) && !isLoopbackReq(r) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte("403 未设置访问密钥（ACCESS_KEY），该操作只允许在本机执行"))
+				return
+			}
+			inner.ServeHTTP(w, r)
+		})
+	}
 	if key := os.Getenv("ACCESS_KEY"); key != "" && key != "off" {
 		next := h
 		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

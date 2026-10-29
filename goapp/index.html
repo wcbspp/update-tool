@@ -1716,7 +1716,7 @@ function rowMenu(key) {
   m.innerHTML = items.map(a => {
     let off = !!BUSY && MUTATE.has(a[1]);
     let why = '执行/预检进行中，先等它结束';
-    if (a[1] === 'delScript' && editingKey && a[2] === editingKey) {
+    if ((a[1] === 'delScript' || a[1] === 'editScript') && editingKey && a[2] === editingKey) {
       off = true; why = '正在编辑这个脚本，先保存或退出编辑';
     }
     return `<button data-fn="${a[1]}" data-arg="${a[2]}"${off ? ` disabled title="${why}"` : ''}>${esc(a[3])}</button>`;
@@ -1985,6 +1985,10 @@ async function editScript(key) {
   if (busyBlocked()) return;
   const sc = IDX.s[key.slice(1)];
   if (!sc) return;
+  if (EDIT_MODE && CUR === sc.id) {
+    toast('「' + sc.name + '」正在编辑，先保存或退出编辑再改名', 'bad');
+    return;
+  }
   const v = await dialog({
     title: '重命名脚本', fields: [{ k: 'name', label: '名称', value: sc.name }],
     validate: x => String(x.name || '').trim() ? '' : '名称不能为空'

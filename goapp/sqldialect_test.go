@@ -168,6 +168,7 @@ func TestFindUnsafeStatement(t *testing.T) {
 		"DELETE IGNORE FROM t",
 		"WITH c AS (SELECT 1) DELETE FROM t",
 		"DELETE FROM t PARTITION (p0)",
+		"DELETE FROM t1 USING t1 JOIN t2 ON t1.id=t2.id",
 	}
 	for _, st := range blocked {
 		if _, _, bad := findUnsafeStatement([]string{st}); !bad {
@@ -178,7 +179,6 @@ func TestFindUnsafeStatement(t *testing.T) {
 		"DELETE FROM t WHERE 1=1",
 		"DELETE FROM t ORDER BY id LIMIT 5",
 		"DELETE a FROM t1 a JOIN t2 b ON a.id=b.id WHERE b.x=1",
-		"DELETE FROM t1 USING t1 JOIN t2 ON t1.id=t2.id",
 		"UPDATE t SET a=1",
 		"INSERT INTO t (a) VALUES (1)",
 	}
@@ -194,5 +194,45 @@ func TestFindUnsafeStatement(t *testing.T) {
 	// 序号是 1-based，且能定位到第几条
 	if idx, _, bad := findUnsafeStatement([]string{"SELECT 1", "DELETE FROM t"}); !bad || idx != 2 {
 		t.Fatalf("定位错：idx=%d bad=%v", idx, bad)
+	}
+}
+
+// 审计回归：多表写法的整表 DELETE 也必须拦
+func TestUnsafeMultiTableDelete(t *testing.T) {
+	for _, st := range []string{
+		"DELETE t1 FROM t1",
+		"DELETE FROM t1 USING t1",
+		"DELETE a, b FROM t1 a JOIN t2 b ON a.id=b.id",
+	} {
+		if _, _, bad := findUnsafeStatement([]string{st}); !bad {
+			t.Fatalf("%q 应被拦（无 WHERE 的整表删除）", st)
+		}
+	}
+	// 带 WHERE 的多表 DELETE 仍然放行
+	if _, _, bad := findUnsafeStatement([]string{"DELETE a FROM t1 a JOIN t2 b ON a.id=b.id WHERE b.x=1"}); bad {
+		t.Fatal("带 WHERE 的多表 DELETE 不该被拦")
+	}
+}
+
+// 审计回归：执行中改设置/退出也要被 busy 挡住
+func TestConfigWriteCoversSettings(t *testing.T) {
+	for _, p := range []string{"/api/settings", "/api/shutdown", "/api/script", "/api/ds"} {
+		if !isConfigWrite(p, "POST") {
+			t.Fatalf("%s 应该算配置写入", p)
+		}
+	}
+	if isConfigWrite("/api/health", "GET") {
+		t.Fatal("健康检查不该被拦")
+	}
+}
+
+// 审计回归：没写列清单的 INSERT..SELECT 不能按同名硬猜
+func TestInsertKeyMapNoColumnList(t *testing.T) {
+	pk := []string{"A", "B"}
+	if _, ok := insertKeyMap("SELECT B, A FROM s", "", pk); ok {
+		t.Fatal("没写列清单且非 * 时不该给出映射")
+	}
+	if _, ok := insertKeyMap("SELECT * FROM s", "", pk); !ok {
+		t.Fatal("SELECT * 应按同名映射")
 	}
 }

@@ -131,6 +131,11 @@ func splitAnd(s string) []string {
 func parseAtom(a string) (col string, c cstr, ok bool) {
 	a = strings.TrimSpace(a)
 	up := strings.ToUpper(a)
+	// NOT IN / NOT LIKE / NOT BETWEEN 是补集，当前只做正向判断；
+	// 误当成正向会给出「互不重叠」的错误绿灯，宁可判为未知
+	if strings.Contains(up, " NOT ") {
+		return "", cstr{}, false
+	}
 	switch {
 	case strings.Contains(up, " BETWEEN "):
 		parts := strings.SplitN(a, " ", 4)

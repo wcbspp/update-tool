@@ -1790,10 +1790,8 @@ func insertKeyMap(sel, colList string, pk []string) (map[string]string, bool) {
 		}
 	}
 	if cols == nil {
-		for _, c := range pk {
-			u := strings.ToUpper(c)
-			out[u] = u
-		}
+		// 没写列清单、又不是 SELECT *：值按位置对应，名字对不上就说不清
+		return map[string]string{}, false
 	}
 	for _, c := range pk {
 		if _, ok := out[strings.ToUpper(c)]; !ok {
@@ -3730,7 +3728,9 @@ func isConfigWrite(p, method string) bool {
 		return false
 	}
 	switch p {
-	case "/api/ds", "/api/group", "/api/script", "/api/order":
+	case "/api/ds", "/api/group", "/api/script", "/api/order",
+		"/api/settings", "/api/shutdown":
+		// settings 可能在执行中被改成别的监听范围并触发重启；shutdown 会直接杀进程
 		return true
 	}
 	return false
@@ -3993,8 +3993,9 @@ func findUnsafeStatement(stmts []string) (int, string, bool) {
 		if stmtKind(plain) != "delete" {
 			continue
 		}
-		if whereTail(plain) != "" || deleteLimit(plain) > 0 ||
-			reDeleteUsing.MatchString(plain) || reDeleteMulti.MatchString(plain) {
+		// 只看「有没有 WHERE / LIMIT」。多表写法（DELETE t1 FROM t1、… USING …）
+		// 不带 WHERE 也是整表删除，不能放行
+		if whereTail(plain) != "" || deleteLimit(plain) > 0 {
 			continue
 		}
 		hint := "确实要清空请加 LIMIT，或者改用 TRUNCATE"
@@ -4391,6 +4392,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "id": id, "tree": buildTree(s)})
 
 	case r.Method == http.MethodDelete && p == "/api/ds":
+		if strings.TrimSpace(r.URL.Query().Get("id")) == "" {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "缺少 id 参数，已拒绝（空 id 会匹配到全部顶层节点）"})
+			return
+		}
 		id := r.URL.Query().Get("id")
 		mu.Lock()
 		s := loadStore()
@@ -4635,6 +4640,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "id": id, "tree": buildTree(s)})
 
 	case r.Method == http.MethodDelete && p == "/api/group":
+		if strings.TrimSpace(r.URL.Query().Get("id")) == "" {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "缺少 id 参数，已拒绝（空 id 会匹配到全部顶层节点）"})
+			return
+		}
 		id := r.URL.Query().Get("id")
 		mu.Lock()
 		s := loadStore()
@@ -4740,6 +4749,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "id": id, "tree": buildTree(s)})
 
 	case r.Method == http.MethodDelete && p == "/api/script":
+		if strings.TrimSpace(r.URL.Query().Get("id")) == "" {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "缺少 id 参数，已拒绝（空 id 会匹配到全部顶层节点）"})
+			return
+		}
 		id := r.URL.Query().Get("id")
 		mu.Lock()
 		s := loadStore()
@@ -5246,6 +5259,9 @@ func main() {
 		if hp, _, err := net.SplitHostPort(r.Host); err == nil {
 			host = hp
 		}
+		// 防点击劫持：本机服务对任何网页都可访问，必须禁止被 iframe 嵌套
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 		if !hostAllowed(host, extraHosts) {
 			http.Error(w, "403 只允许本机或局域网访问", http.StatusForbidden)
 			return
@@ -5299,6 +5315,8 @@ func main() {
 		Addr:              addr,
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second, // 防止 body 不发导致忙碌锁被永久占用
+		WriteTimeout:      0,                // 执行可能很久，写超时交给业务层
 		IdleTimeout:       120 * time.Second,
 	}
 	if err := srv.ListenAndServe(); err != nil {

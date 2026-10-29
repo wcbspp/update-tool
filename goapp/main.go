@@ -3986,6 +3986,26 @@ func findScriptByID(s Store, id string) (Script, bool) {
 	return Script{}, false
 }
 
+// 执行入口的兜底：找出会清空整表/分区的 DELETE。返回 1-based 序号、提示、是否命中。
+func findUnsafeStatement(stmts []string) (int, string, bool) {
+	for idx, st := range stmts {
+		plain := reDeleteMods.ReplaceAllString(st, "delete ")
+		if stmtKind(plain) != "delete" {
+			continue
+		}
+		if whereTail(plain) != "" || deleteLimit(plain) > 0 ||
+			reDeleteUsing.MatchString(plain) || reDeleteMulti.MatchString(plain) {
+			continue
+		}
+		hint := "确实要清空请加 LIMIT，或者改用 TRUNCATE"
+		if strings.Contains(strings.ToLower(plain), "partition") {
+			hint = "按分区清空请改用 TRUNCATE TABLE … PARTITION (…)"
+		}
+		return idx + 1, hint, true
+	}
+	return 0, "", false
+}
+
 func handler(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 
@@ -4942,20 +4962,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": "没有可执行的 SQL"})
 			return
 		}
-		// 预检是能关的开关，这条防线必须在执行入口自己兜住：
-		// 无条件 DELETE（无 WHERE、无 LIMIT、无 JOIN）直接拒绝。
-		for idx, st := range stmts {
-			plain := reDeleteMods.ReplaceAllString(st, "delete ")
-			if stmtKind(plain) == "delete" && whereTail(plain) == "" && deleteLimit(plain) == 0 &&
-				!reDeleteUsing.MatchString(plain) && !reDeleteMulti.MatchString(plain) {
-				hint := "确实要清空请加 LIMIT，或者改用 TRUNCATE"
-				if strings.Contains(strings.ToLower(plain), "partition") {
-					hint = "按分区清空请改用 TRUNCATE TABLE … PARTITION (…)"
-				}
-				writeJSON(w, 400, map[string]any{"ok": false,
-					"error": fmt.Sprintf("第 %d 条是无条件 DELETE，会清空整张表，已拒绝执行；%s", idx+1, hint)})
-				return
-			}
+		// 预检是能关的开关，这条防线必须在执行入口自己兜住
+		if idx, hint, bad := findUnsafeStatement(stmts); bad {
+			writeJSON(w, 400, map[string]any{"ok": false,
+				"error": fmt.Sprintf("第 %d 条是无条件 DELETE，会清空整张表，已拒绝执行；%s", idx, hint)})
+			return
 		}
 		dry := true
 		if b.DryRun != nil {

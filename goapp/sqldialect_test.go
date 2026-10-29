@@ -157,3 +157,42 @@ func TestMariaDBVersion(t *testing.T) {
 		t.Fatal("MariaDB 10.11 应支持 CTE")
 	}
 }
+
+// 执行入口兜底：哪些 DELETE 必须拦、哪些必须放行
+func TestFindUnsafeStatement(t *testing.T) {
+	blocked := []string{
+		"DELETE FROM t",
+		"DELETE FROM t;",
+		"DELETE LOW_PRIORITY FROM t",
+		"delete quick from t",
+		"DELETE IGNORE FROM t",
+		"WITH c AS (SELECT 1) DELETE FROM t",
+		"DELETE FROM t PARTITION (p0)",
+	}
+	for _, st := range blocked {
+		if _, _, bad := findUnsafeStatement([]string{st}); !bad {
+			t.Fatalf("%q 应该被拦", st)
+		}
+	}
+	allowed := []string{
+		"DELETE FROM t WHERE 1=1",
+		"DELETE FROM t ORDER BY id LIMIT 5",
+		"DELETE a FROM t1 a JOIN t2 b ON a.id=b.id WHERE b.x=1",
+		"DELETE FROM t1 USING t1 JOIN t2 ON t1.id=t2.id",
+		"UPDATE t SET a=1",
+		"INSERT INTO t (a) VALUES (1)",
+	}
+	for _, st := range allowed {
+		if _, _, bad := findUnsafeStatement([]string{st}); bad {
+			t.Fatalf("%q 不该被拦", st)
+		}
+	}
+	// 分区提示要准确
+	if _, hint, _ := findUnsafeStatement([]string{"DELETE FROM t PARTITION (p0)"}); !strings.Contains(hint, "PARTITION") {
+		t.Fatalf("分区提示不对：%q", hint)
+	}
+	// 序号是 1-based，且能定位到第几条
+	if idx, _, bad := findUnsafeStatement([]string{"SELECT 1", "DELETE FROM t"}); !bad || idx != 2 {
+		t.Fatalf("定位错：idx=%d bad=%v", idx, bad)
+	}
+}

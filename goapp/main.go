@@ -433,6 +433,11 @@ func saveStore(s Store) error {
 	if err != nil {
 		return err
 	}
+	// 文件里是明文库口令：已存在的临时文件不会被 O_CREATE 改权限，这里强制收紧。
+	// 收不紧不阻断保存——丢配置比权限宽松严重得多，但要留个痕迹
+	if err := f.Chmod(0o600); err != nil {
+		log.Printf("提示：无法把 %s 权限收紧到 600（%v），保存继续", tmp, err)
+	}
 	if _, err := f.Write(b); err != nil {
 		f.Close()
 		os.Remove(tmp)

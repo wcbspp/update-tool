@@ -2913,6 +2913,8 @@ async function openSettings() {
         <span>允许局域网访问</span><em>同网段任何人都能打开并执行脚本</em></label>
     </div>
     <div class="hintBox">本工具没有登录验证。开启局域网访问前，请确认网络环境可信。修改后程序会自动重启（约 2 秒）。</div>
+    <div class="hintBox">配置保存在程序同目录的 <b>data.json</b>，其中数据库口令是<b>明文</b>（文件权限 600，仅本机账号可读）。
+      请勿把这个文件发给他人，也不要放到网盘或代码仓库。</div>
     <div class="repoBox"><span class="repoLbl">仓库</span>
       <a href="${REPO_URL}" target="_blank" rel="noopener">${esc(REPO_URL.replace('https://github.com/', ''))} ↗</a></div>
     <div class="foot">

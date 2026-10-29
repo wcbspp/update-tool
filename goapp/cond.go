@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -27,12 +29,23 @@ type parsedWhere struct {
 	atoms   int
 }
 
+var reDateLike = regexp.MustCompile(`^(\d{4})-(\d{1,2})-(\d{1,2})([ T].*)?$`)
+
 func normVal(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.Trim(s, "'\"`")
 	// 数字统一成十进制形式，避免 '01' / '1' 被判成不同
 	if f, err := strconv.ParseFloat(s, 64); err == nil {
 		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	// 日期/时间补零：从 Excel 粘过来的 '2025-1-15' 和 '2025-01-15' 是同一天
+	if m := reDateLike.FindStringSubmatch(s); m != nil {
+		y, _ := strconv.Atoi(m[1])
+		mo, _ := strconv.Atoi(m[2])
+		d, _ := strconv.Atoi(m[3])
+		if mo >= 1 && mo <= 12 && d >= 1 && d <= 31 {
+			return fmt.Sprintf("%04d-%02d-%02d%s", y, mo, d, m[4])
+		}
 	}
 	return strings.ToLower(s)
 }

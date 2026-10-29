@@ -169,6 +169,8 @@ func TestFindUnsafeStatement(t *testing.T) {
 		"WITH c AS (SELECT 1) DELETE FROM t",
 		"DELETE FROM t PARTITION (p0)",
 		"DELETE FROM t1 USING t1 JOIN t2 ON t1.id=t2.id",
+		"UPDATE t SET a=1",
+		"UPDATE LOW_PRIORITY t SET a=1",
 	}
 	for _, st := range blocked {
 		if _, _, bad := findUnsafeStatement([]string{st}); !bad {
@@ -177,9 +179,10 @@ func TestFindUnsafeStatement(t *testing.T) {
 	}
 	allowed := []string{
 		"DELETE FROM t WHERE 1=1",
+		"UPDATE t SET a=1 WHERE id=1",
+		"UPDATE t SET a=1 ORDER BY id LIMIT 5",
 		"DELETE FROM t ORDER BY id LIMIT 5",
 		"DELETE a FROM t1 a JOIN t2 b ON a.id=b.id WHERE b.x=1",
-		"UPDATE t SET a=1",
 		"INSERT INTO t (a) VALUES (1)",
 	}
 	for _, st := range allowed {

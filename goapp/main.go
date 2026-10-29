@@ -559,6 +559,7 @@ func stmtKind(st string) string {
 }
 
 func splitStatements(text string) []string {
+	text = strings.TrimPrefix(text, "\ufeff") // 从记事本/Excel 粘贴常带 BOM
 	var out []string
 	var buf strings.Builder
 	inS, inD, inBt, inLine, inBlock := false, false, false, false, false
@@ -1014,6 +1015,7 @@ var (
 	reDeleteMulti = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*(.+?)\s+from\s+`)
 	// 单表：DELETE [修饰词] FROM t [AS a] 后面直接是 WHERE/ORDER/LIMIT/结尾，
 	// 不能再有 from（否则是子查询，属于单表语句，不是多表 DELETE）
+	reReleaseZip   = regexp.MustCompile(`^medupdate-(win|mac|linux)-\d+\.\d+\.\d+-[0-9a-f]{6}\.zip$`)
 	reDeleteMods   = regexp.MustCompile(`(?is)^\s*delete\s+(?:(?:low_priority|quick|ignore)\s+)+`)
 	reDeleteSingle = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*from\s+[\x60"]?[\w$.]+[\x60"]?\s*(?:as\s+[\x60"]?[\w$]+[\x60"]?)?\s*(?:where\b|order\s+by\b|limit\b|;?\s*$)`)
 	reDeleteUsing  = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)[\x60"]?\s+using\s+`)
@@ -2085,7 +2087,6 @@ func whereRaw(st string) string {
 	return strings.TrimSpace(w)
 }
 
-// 只读预估：把 UPDATE 的 FROM/WHERE 拿来 COUNT，不写任何数据
 // explainIndexes: 只做 EXPLAIN（不执行），返回本次统计实际用到的索引，形如 "hilist_b(PRIMARY)"
 func explainIndexes(db *sql.DB, q string) string {
 	ctxX, cancelX := explainCtx()
@@ -2861,9 +2862,33 @@ func parseSetAssignments(rest string) ([]string, [][]string) {
 }
 
 // INSERT ... SELECT 的源子句（从顶层 FROM 到末尾，去掉 ON DUPLICATE）
+// 把连续空白压成一个空格，并记录每个字符在原文里的下标
+func collapseWS(s string) (string, []int) {
+	var b strings.Builder
+	idx := make([]int, 0, len(s))
+	prevSpace := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ' ' || c == '\n' || c == '\t' || c == '\r' {
+			if prevSpace {
+				continue
+			}
+			prevSpace = true
+			b.WriteByte(' ')
+			idx = append(idx, i)
+			continue
+		}
+		prevSpace = false
+		b.WriteByte(c)
+		idx = append(idx, i)
+	}
+	return b.String(), idx
+}
+
 func selectFromTail(sel string) string {
-	if k := indexTopLevelPhrase(sel, " from "); k >= 0 {
-		tail := strings.TrimSpace(sel[k:])
+	flat, idx := collapseWS(sel)
+	if k := strings.Index(strings.ToLower(flat), " from "); k >= 0 {
+		tail := strings.TrimSpace(sel[idx[k]:])
 		if j := indexTopLevelPhrase(tail, " on duplicate"); j >= 0 {
 			tail = strings.TrimSpace(tail[:j])
 		}
@@ -2874,7 +2899,10 @@ func selectFromTail(sel string) string {
 
 // 源子句带 JOIN/WHERE 时，按整段子查询计数才准
 func countSourceRows(db *sql.DB, fromTail string, capN int64, pfSec int) (int64, bool, error) {
-	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 %s LIMIT %d) x", fromTail, capN+1)
+	// 源子句可能自带 ORDER BY / LIMIT，再套一层 LIMIT 会变成两条 LIMIT（语法错）
+	tail := cutAtKeyword(fromTail, "order by")
+	tail = cutAtKeyword(tail, "limit")
+	q := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 %s LIMIT %d) x", strings.TrimSpace(tail), capN+1)
 	ctx, cancel := pfCtx(pfSec)
 	defer cancel()
 	var n int64
@@ -2888,7 +2916,8 @@ func countSourceRows(db *sql.DB, fromTail string, capN int64, pfSec int) (int64,
 }
 
 func sourceClauseIsComplex(tail string) bool {
-	up := strings.ToUpper(tail)
+	flat, _ := collapseWS(tail)
+	up := strings.ToUpper(flat)
 	return strings.Contains(up, " JOIN ") || strings.Contains(up, " WHERE ")
 }
 
@@ -3295,6 +3324,8 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					lvl, msg = "warn", fmt.Sprintf("%s 已有 %d 行同主键，会走 %s 覆盖/跳过，不会报错", target, conf, tolerantHow)
 				}
 				addD(i, lvl, "主键冲突", msg, durConf)
+			} else if complexSrc {
+				addD(i, "warn", "判重未执行", "源表带 JOIN 或 WHERE，未做自动比对；请人工确认这批是否已插入过", durConf)
 			} else {
 				addD(i, "ok", "无主键冲突", fmt.Sprintf("与 %s 比对无重复", target), durConf)
 			}
@@ -4068,7 +4099,15 @@ func findScriptByID(s Store, id string) (Script, bool) {
 func findUnsafeStatement(stmts []string) (int, string, bool) {
 	for idx, st := range stmts {
 		plain := reDeleteMods.ReplaceAllString(st, "delete ")
-		if stmtKind(plain) != "delete" {
+		kind := stmtKind(plain)
+		if kind == "update" {
+			// 与 DELETE 同一套判断：没 WHERE、没 LIMIT 的 UPDATE 会把整表改掉
+			if whereTail(plain) == "" && deleteLimit(plain) == 0 {
+				return idx + 1, "确实要全表更新请写成 WHERE 1=1", true
+			}
+			continue
+		}
+		if kind != "delete" {
 			continue
 		}
 		// 只看「有没有 WHERE / LIMIT」。多表写法（DELETE t1 FROM t1、… USING …）
@@ -4102,10 +4141,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			"medupdate-mac":   "release-mac/medupdate",
 			"medupdate-linux": "release-linux/medupdate",
 		}
-		// dist 下的包按实际文件名提供，避免白名单写死旧版本号
-		if names, err := filepath.Glob(filepath.Join(appHome, "dist", "*.zip")); err == nil {
+		// 只放行发版脚本生成的包名（medupdate-平台-版本-6位hex.zip）。
+		// 不能整目录 glob：dist 里可能有别处打出来的包，里面带 data.json（库口令）。
+		if names, err := filepath.Glob(filepath.Join(appHome, "dist", "medupdate-*.zip")); err == nil {
 			for _, full := range names {
-				files[filepath.Base(full)] = filepath.Join("dist", filepath.Base(full))
+				base := filepath.Base(full)
+				if !reReleaseZip.MatchString(base) {
+					continue
+				}
+				files[base] = filepath.Join("dist", base)
 			}
 		}
 		name := strings.TrimPrefix(p, "/dl/")
@@ -4380,7 +4424,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			Database      *string  `json:"database"`
 			Password      *string  `json:"password"`
 			ClearPassword bool     `json:"clearPassword"`
-			VersionPfxs   *string  `json:"versionPrefixes"`
 			Env           *string  `json:"env"`
 			ConnSec       *flexInt `json:"connSec"`
 			IOSec         *flexInt `json:"ioSec"`
@@ -5386,16 +5429,22 @@ func main() {
 	fmt.Println()
 	fmt.Println("  update-tool v" + appVersion)
 	fmt.Printf("  本机   http://127.0.0.1:%s/\n", port)
-	for _, ip := range lanIPs() {
-		fmt.Printf("  局域网 http://%s:%s/\n", ip, port)
+	if host == "0.0.0.0" {
+		for _, ip := range lanIPs() {
+			fmt.Printf("  局域网 http://%s:%s/\n", ip, port)
+		}
 	}
 	fmt.Printf("  数据   %s\n\n", dataFile)
 
+	openURL := "http://127.0.0.1:" + port + "/"
+	if key := os.Getenv("ACCESS_KEY"); key != "" && key != "off" {
+		openURL += "?k=" + key
+	}
 	if !ensureInstance(port) {
-		openBrowser("http://127.0.0.1:" + port + "/")
+		openBrowser(openURL)
 		return
 	}
-	openBrowser("http://127.0.0.1:" + port + "/")
+	openBrowser(openURL)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           h,

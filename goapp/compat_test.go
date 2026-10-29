@@ -185,6 +185,9 @@ func TestSQLCompatMatrix(t *testing.T) {
 		targets = append(targets, target{kv[0], kv[1]})
 	}
 
+	if len(targets) == 0 {
+		t.Fatalf("MYSQL_COMPAT_DSNS 解析不出任何条目：%q（格式 name=dsn,name=dsn）", raw)
+	}
 	for _, tg := range targets {
 		tg := tg
 		t.Run(tg.name, func(t *testing.T) {

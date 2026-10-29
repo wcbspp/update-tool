@@ -464,8 +464,78 @@ func newID() string {
 /* ---------------- SQL 拆分 ---------------- */
 
 // 语句类型分派：预检按这个决定走哪套检查
+
+// MySQL 8.0 的 CTE：WITH a AS (...) [, b AS (...)] UPDATE/DELETE/...
+// 预检要看的是主语句，CTE 定义本身不用分析（也不影响行数判断）
+func stripCTE(st string) string {
+	t := strings.TrimSpace(st)
+	if len(t) < 4 || !strings.EqualFold(t[:4], "with") {
+		return st
+	}
+	low := strings.ToLower(t)
+	depth := 0
+	inS, inD, inBt := false, false, false
+	for i := 4; i < len(low); i++ {
+		c := low[i]
+		if inS {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '\'' {
+				inS = false
+			}
+			continue
+		}
+		if inD {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inD = false
+			}
+			continue
+		}
+		if inBt {
+			if c == '`' {
+				inBt = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inS = true
+		case '"':
+			inD = true
+		case '`':
+			inBt = true
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth != 0 || (c < 'a' || c > 'z') {
+				continue
+			}
+			for _, kw := range []string{"select", "insert", "replace", "update", "delete"} {
+				if strings.HasPrefix(low[i:], kw) {
+					prevOK := i == 0 || !isWordRune(rune(low[i-1]))
+					nextOK := i+len(kw) == len(low) || !isWordRune(rune(low[i+len(kw)]))
+					if prevOK && nextOK {
+						return strings.TrimSpace(t[i:])
+					}
+				}
+			}
+		}
+	}
+	return st
+}
+
 func stmtKind(st string) string {
-	up := strings.ToUpper(strings.TrimSpace(st))
+	up := strings.ToUpper(strings.TrimSpace(stripCTE(st)))
 	switch {
 	case strings.HasPrefix(up, "INSERT"), strings.HasPrefix(up, "REPLACE"):
 		return "insert"
@@ -2063,6 +2133,22 @@ func explainIndexes(db *sql.DB, q string) string {
 
 // DELETE t1, t2 FROM t1 JOIN t2 ... ：把别名映射回真实表名
 
+var reCTEName = regexp.MustCompile(`(?is)\b([A-Za-z_][A-Za-z0-9_$]*)\s*(?:\([^)]*\)\s*)?as\s*\(`)
+
+// CTE 定义里的名字不是真实表，后面解析表引用时要排除掉
+func cteNames(st string) map[string]bool {
+	out := map[string]bool{}
+	main := stripCTE(st)
+	if len(main) >= len(st) {
+		return out
+	}
+	prefix := st[:len(st)-len(main)]
+	for _, m := range reCTEName.FindAllStringSubmatch(prefix, -1) {
+		out[strings.ToLower(m[1])] = true
+	}
+	return out
+}
+
 var reJoinKw = regexp.MustCompile(`(?is)\s+(?:straight_join|inner\s+join|left\s+(?:outer\s+)?join|right\s+(?:outer\s+)?join|cross\s+join|join)\s+`)
 
 // UPDATE 的多表部分既可能是 "t1 a, t2 b"，也可能是 "t1 a JOIN t2 b ON ..."，
@@ -2839,7 +2925,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 
 	batchTables := make([]string, 0)
 	seenTable := map[string]bool{}
-	for i, st := range stmts {
+	for i, stRaw := range stmts {
+		st := stripCTE(stRaw)
+		ctes := cteNames(stRaw)
 		for _, m := range reBatch.FindAllStringSubmatch(st, -1) {
 			full := strings.ToLower(m[0])
 			if !seenTable[full] {
@@ -3003,6 +3091,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			var refs []tblRef
 			for _, part := range updateTableParts(tablesPart) {
 				if t, a := parseTableRef(part); t != "" {
+					if ctes[strings.ToLower(trimIdent(t))] {
+						continue // CTE 不是真实表
+					}
 					refs = append(refs, tblRef{mResolveTable(db, schema, t), a})
 				}
 			}
@@ -3094,7 +3185,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 			// 行数估算与各源表行数互不依赖，收集起来和整段脚本的其它语句一起并发跑
 			updPending = append(updPending, updTask{
-				i: i, stmt: st, target: targetTable, alias: targetAlias,
+				i: i, stmt: stRaw, target: targetTable, alias: targetAlias,
 				refs: refs, updated: updated,
 			})
 
@@ -3171,7 +3262,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 			}
 			if countTable != "" {
-				delPending = append(delPending, delTask{i: i, stmt: st, table: countTable, where: where, lim: lim})
+				delPending = append(delPending, delTask{i: i, stmt: stRaw, table: countTable, where: where, lim: lim})
 			}
 		}
 	}

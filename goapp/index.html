@@ -34,7 +34,7 @@
   .tree{flex:1;overflow:auto;padding:0 6px 12px}
   .tree::-webkit-scrollbar,.res::-webkit-scrollbar,.hl::-webkit-scrollbar,.edta::-webkit-scrollbar{width:9px;height:9px}
   .tree::-webkit-scrollbar-thumb,.res::-webkit-scrollbar-thumb{background:#2a3342;border-radius:6px}
-  .node{position:relative;display:flex;align-items:center;gap:5px;height:27px;padding:0 64px 0 6px;border-radius:5px;cursor:pointer;user-select:none}
+  .node{position:relative;display:flex;align-items:center;gap:5px;height:27px;padding:0 26px 0 6px;border-radius:5px;cursor:pointer;user-select:none}
   .node:hover{background:#1a2029}
   .node.sel{background:#182437;box-shadow:inset 2px 0 0 var(--acc)}
   .node .chev{width:11px;text-align:center;color:#5b6577;font-size:8px;flex:none;transition:transform .12s}
@@ -364,16 +364,21 @@
   .badge.prod{color:#ffb0b6;border-color:#5d2a30;background:#2a1216}
   .badge.test{color:#a8c8ff;border-color:#24344d;background:#111a27}
 
-  /* 悬停时按钮浮在右侧，不再挤压文字 */
-  .node{position:relative}
+  /* 选中行右侧只露一个 ⋯，不给整行铺渐变块 */
   .node .acts{
-    position:absolute;right:5px;top:0;bottom:0;display:flex;align-items:center;gap:3px;
-    padding-left:16px;opacity:0;pointer-events:none;transition:opacity .12s;
-    background:linear-gradient(90deg, rgba(26,33,44,0) 0%, #1a212c 38%);
-    border-radius:0 5px 5px 0}
-  /* 只有选中行显示操作按钮：悬停不再冒出多个按钮组 */
-  .node.sel .acts{opacity:1;pointer-events:auto}
-  .node.sel .acts{background:linear-gradient(90deg, rgba(27,44,70,0) 0%, #1b2c46 38%)}
+    position:absolute;right:3px;top:50%;transform:translateY(-50%);
+    display:none;align-items:center}
+  .node.sel .acts{display:flex}
+  .node .acts button.more{
+    width:18px;height:18px;padding:0;display:flex;align-items:center;justify-content:center;
+    background:none;border:0;border-radius:4px;color:#7f8b9e;cursor:pointer;
+    font-size:14px;line-height:1}
+  .node .acts button.more:hover{background:#232c3a;color:#dfe6f2}
+  #rowmenu{position:fixed;z-index:60;min-width:132px;padding:4px;background:#161c25;
+    border:1px solid #2d3646;border-radius:8px;box-shadow:0 10px 30px #000a}
+  #rowmenu button{display:block;width:100%;text-align:left;padding:6px 10px;background:none;
+    border:0;border-radius:5px;color:#dbe3ef;font-size:12px;cursor:pointer;white-space:nowrap}
+  #rowmenu button:hover{background:#232c3a}
   /* 悬停时把行数/库名往左让一点，避免被按钮压住 */
   .node:hover .sub{opacity:0}
   .node .sub{transition:opacity .12s}
@@ -1133,11 +1138,48 @@ function row({ key, depth, chev, open, ico, label, sub, badge, envBadge, tip, ac
     ${envBadge ? `<span class="badge ${envBadge === '测试' ? 'test' : 'prod'}">${envBadge}</span>` : ''}
     ${badge ? `<span class="badge">${esc(badge)}</span>` : ''}
     ${sub ? `<span class="sub">${esc(sub)}</span>` : ''}
-    <span class="acts">${(acts || []).map(a => `<button data-act="${a[1]}" data-arg="${a[2]}" title="${esc(a[3])}" data-tip="${esc(a[3])}">${a[0]}</button>`).join('')}</span>
+    <span class="acts">${(acts && acts.length) ? `<button class="more" data-act="rowMenu" data-arg="${key}" data-menu="${encodeURIComponent(JSON.stringify(acts))}" title="更多">⋯</button>` : ''}</span>
   </div>`;
 }
 
 let TREE_LOCK = 0;
+
+function closeRowMenu() {
+  const m = document.getElementById('rowmenu');
+  if (m) m.remove();
+  document.removeEventListener('mousedown', rowMenuOutside, true);
+  window.removeEventListener('scroll', closeRowMenu, true);
+  window.removeEventListener('resize', closeRowMenu);
+}
+function rowMenuOutside(e) {
+  const m = document.getElementById('rowmenu');
+  if (m && !m.contains(e.target)) closeRowMenu();
+}
+function rowMenu(key) {
+  closeRowMenu();
+  const btn = document.querySelector(`.node[data-key="${key}"] .acts button`);
+  if (!btn) return;
+  let items = [];
+  try { items = JSON.parse(decodeURIComponent(btn.dataset.menu || '')); } catch (e) { return; }
+  if (!items.length) return;
+  const m = document.createElement('div');
+  m.id = 'rowmenu';
+  m.innerHTML = items.map(a => `<button data-fn="${a[1]}" data-arg="${a[2]}">${esc(a[3])}</button>`).join('');
+  document.body.appendChild(m);
+  const r = btn.getBoundingClientRect();
+  const w = m.offsetWidth, h = m.offsetHeight;
+  m.style.left = Math.max(4, Math.min(r.right - w, window.innerWidth - w - 6)) + 'px';
+  m.style.top = (r.bottom + h + 6 > window.innerHeight ? r.top - h - 4 : r.bottom + 4) + 'px';
+  m.querySelectorAll('button').forEach(b => b.onclick = ev => {
+    ev.stopPropagation();
+    const fn = window[b.dataset.fn];
+    closeRowMenu();
+    if (fn) fn(b.dataset.arg);
+  });
+  document.addEventListener('mousedown', rowMenuOutside, true);
+  window.addEventListener('scroll', closeRowMenu, true);
+  window.addEventListener('resize', closeRowMenu);
+}
 
 function bindTree() {
   $('tree').querySelectorAll('.node').forEach(el => {

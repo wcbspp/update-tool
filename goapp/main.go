@@ -932,9 +932,9 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 /* ---------------- 体检（DML 预检） ---------------- */
 
 var (
-	reInsert = regexp.MustCompile(`(?is)^\s*(?:insert|replace)\s+(?:ignore\s+)?into\s+[\x60"]?([\w$.]+)[\x60"]?\s*(?:\(([^)]*)\))?\s*((?:select|values)\b.*)$`)
+	reInsert = regexp.MustCompile(`(?is)^\s*(?:insert|replace)\s+(?:low_priority\s+|delayed\s+|high_priority\s+)?(?:ignore\s+)?(?:into\s+)?[\x60"]?([\w$.]+)[\x60"]?\s*(?:partition\s*\([^)]*\)\s*)?(?:\(([^)]*)\)\s*)?((?:select|values|set)\b.*)$`)
 	reFrom   = regexp.MustCompile(`(?is)\bfrom\s+[\x60"]?([\w$.]+)[\x60"]?`)
-	reUpdate = regexp.MustCompile(`(?is)^\s*update\s+(.+?)\s+set\s+(.+)$`)
+	reUpdate = regexp.MustCompile(`(?is)^\s*update\s+(?:low_priority\s+)?(?:ignore\s+)?(.+?)\s+set\s+(.+)$`)
 	reDelete = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)`)
 	// DELETE t1, t2 FROM ... 与 DELETE FROM t USING ...
 	reDeleteMulti = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*(.+?)\s+from\s+`)
@@ -966,6 +966,7 @@ func resolveTableOK(db *sql.DB, schema, name string) (string, bool) {
 
 func normTable(n string) string {
 	n = strings.TrimSpace(n)
+	n = strings.TrimSuffix(n, ".*") // DELETE t1.* FROM ... 里的 .*
 	n = strings.Trim(n, "`\"")
 	if i := strings.LastIndex(n, "."); i >= 0 {
 		n = strings.Trim(n[i+1:], "`\"")
@@ -2640,8 +2641,41 @@ func insertTolerant(st string) (bool, string) {
 	return false, ""
 }
 
+// INSERT ... SET a=1, b=2 —— 拆成列名和一行的值
+func parseSetAssignments(rest string) ([]string, [][]string) {
+	low := strings.ToLower(strings.TrimSpace(rest))
+	if !strings.HasPrefix(low, "set") {
+		return nil, nil
+	}
+	body := strings.TrimSpace(rest)[3:]
+	var cols, vals []string
+	for _, part := range splitTopLevel(body) {
+		eq := indexTopLevel(part, '=')
+		if eq < 0 {
+			continue
+		}
+		cols = append(cols, trimIdent(strings.TrimSpace(part[:eq])))
+		vals = append(vals, strings.TrimSpace(part[eq+1:]))
+	}
+	if len(cols) == 0 {
+		return nil, nil
+	}
+	return cols, [][]string{vals}
+}
+
 func preflightInsertValues(db *sql.DB, schema string, i int, target, colList, rest string, pfSec int, tolerant bool, tolerantHow string, add func(int, string, string, string)) {
-	tuples := parseValuesTuples(rest)
+	var tuples [][]string
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rest)), "set") {
+		colsFromSet, one := parseSetAssignments(rest)
+		if len(colsFromSet) == 0 {
+			add(i, "warn", "无法解析 SET 赋值", "没能拆出列和值，只确认了目标表；请人工核对")
+			return
+		}
+		colList = strings.Join(colsFromSet, ",")
+		tuples = one
+	} else {
+		tuples = parseValuesTuples(rest)
+	}
 	if len(tuples) == 0 {
 		add(i, "warn", "无法解析 VALUES", "没能拆出具体的值列表，只确认了目标表存在；请人工核对")
 		return

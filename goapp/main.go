@@ -1002,7 +1002,7 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 /* ---------------- 体检（DML 预检） ---------------- */
 
 var (
-	reInsert = regexp.MustCompile(`(?is)^\s*(?:insert|replace)\s+(?:low_priority\s+|delayed\s+|high_priority\s+)?(?:ignore\s+)?(?:into\s+)?[\x60"]?([\w$.]+)[\x60"]?\s*(?:partition\s*\([^)]*\)\s*)?(?:\(([^)]*)\)\s*)?((?:select|values|set)\b.*)$`)
+	reInsert = regexp.MustCompile(`(?is)^\s*(?:insert|replace)\s+(?:low_priority\s+|delayed\s+|high_priority\s+)?(?:ignore\s+)?(?:into\s+)?[\x60"]?([\w$.]+)[\x60"]?\s*(?:partition\s*\([^)]*\)\s*)?(?:\(([^)]*)\)\s*)?((?:select|values?|set)\b.*)$`)
 	reFrom   = regexp.MustCompile(`(?is)\bfrom\s+[\x60"]?([\w$.]+)[\x60"]?`)
 	reUpdate = regexp.MustCompile(`(?is)^\s*update\s+(?:low_priority\s+)?(?:ignore\s+)?(.+?)\s+set\s+(.+)$`)
 	reDelete = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)`)
@@ -1010,6 +1010,7 @@ var (
 	reDeleteMulti = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*(.+?)\s+from\s+`)
 	// 单表：DELETE [修饰词] FROM t [AS a] 后面直接是 WHERE/ORDER/LIMIT/结尾，
 	// 不能再有 from（否则是子查询，属于单表语句，不是多表 DELETE）
+	reDeleteMods   = regexp.MustCompile(`(?is)^\s*delete\s+(?:(?:low_priority|quick|ignore)\s+)+`)
 	reDeleteSingle = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*from\s+[\x60"]?[\w$.]+[\x60"]?\s*(?:as\s+[\x60"]?[\w$]+[\x60"]?)?\s*(?:where\b|order\s+by\b|limit\b|;?\s*$)`)
 	reDeleteUsing  = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)[\x60"]?\s+using\s+`)
 	reIdent        = regexp.MustCompile(`^[\x60"]?([\w$.]+)[\x60"]?`)
@@ -2133,7 +2134,7 @@ func explainIndexes(db *sql.DB, q string) string {
 
 // DELETE t1, t2 FROM t1 JOIN t2 ... ：把别名映射回真实表名
 
-var reCTEName = regexp.MustCompile(`(?is)\b([A-Za-z_][A-Za-z0-9_$]*)\s*(?:\([^)]*\)\s*)?as\s*\(`)
+var reCTEName = regexp.MustCompile("(?is)([A-Za-z_][A-Za-z0-9_$]*|\x60[^\x60]+\x60)\\s*(?:\\([^)]*\\)\\s*)?as\\s*\\(")
 
 // CTE 定义里的名字不是真实表，后面解析表引用时要排除掉
 func cteNames(st string) map[string]bool {
@@ -2143,8 +2144,12 @@ func cteNames(st string) map[string]bool {
 		return out
 	}
 	prefix := st[:len(st)-len(main)]
-	for _, m := range reCTEName.FindAllStringSubmatch(prefix, -1) {
-		out[strings.ToLower(m[1])] = true
+	mask := depthMask(prefix)
+	for _, loc := range reCTEName.FindAllStringSubmatchIndex(prefix, -1) {
+		if loc[2] < 0 || mask[loc[2]] != 0 {
+			continue // 字符串里的 "x AS (" 不算
+		}
+		out[strings.ToLower(strings.Trim(prefix[loc[2]:loc[3]], "`\""))] = true
 	}
 	return out
 }
@@ -2153,17 +2158,105 @@ var reJoinKw = regexp.MustCompile(`(?is)\s+(?:straight_join|inner\s+join|left\s+
 
 // UPDATE 的多表部分既可能是 "t1 a, t2 b"，也可能是 "t1 a JOIN t2 b ON ..."，
 // 统一切成单个表引用，并把 ON 条件丢掉
+
+// 在顶层（跳过字符串和括号）找 SET，避免 ON 条件里的 'a set b' 把语句切坏
+func splitUpdate(st string) (string, string, bool) {
+	t := strings.TrimSpace(st)
+	if len(t) < 6 || !strings.EqualFold(t[:6], "update") {
+		return "", "", false
+	}
+	k := indexTopLevelPhrase(t, " set ")
+	if k < 0 {
+		return "", "", false
+	}
+	tables := strings.TrimSpace(t[len("update"):k])
+	for _, mod := range []string{"low_priority", "ignore"} {
+		for strings.HasPrefix(strings.ToLower(tables), mod) {
+			tables = strings.TrimSpace(tables[len(mod):])
+		}
+	}
+	return tables, strings.TrimSpace(t[k+len(" set "):]), true
+}
+
+// 每个字节位置的括号深度（引号里的括号不算）
+func depthMask(s string) []int {
+	m := make([]int, len(s)+1)
+	depth := 0
+	inS, inD, inBt := false, false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		m[i] = depth
+		if inS {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '\'' {
+				inS = false
+			}
+			continue
+		}
+		if inD {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inD = false
+			}
+			continue
+		}
+		if inBt {
+			if c == '`' {
+				inBt = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inS = true
+		case '"':
+			inD = true
+		case '`':
+			inBt = true
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	m[len(s)] = depth
+	return m
+}
+
 func updateTableParts(s string) []string {
 	var out []string
 	for _, part := range splitTopLevel(s) {
-		for _, sub := range reJoinKw.Split(part, -1) {
+		mask := depthMask(part)
+		var cuts []int
+		for _, loc := range reJoinKw.FindAllStringIndex(part, -1) {
+			if mask[loc[0]] == 0 { // 只切顶层 JOIN，派生表里的不算
+				cuts = append(cuts, loc[0], loc[1])
+			}
+		}
+		var pieces []string
+		start := 0
+		for i := 0; i+1 < len(cuts); i += 2 {
+			pieces = append(pieces, part[start:cuts[i]])
+			start = cuts[i+1]
+		}
+		pieces = append(pieces, part[start:])
+		for _, sub := range pieces {
 			if k := indexTopLevelPhrase(sub, " on "); k >= 0 {
 				sub = sub[:k]
 			}
 			sub = strings.TrimSpace(sub)
-			if sub != "" {
-				out = append(out, sub)
+			if sub == "" || strings.HasPrefix(sub, "(") { // 派生表不是表名
+				continue
 			}
+			out = append(out, sub)
 		}
 	}
 	return out
@@ -2220,11 +2313,10 @@ func aliasToTable(st string) map[string]string {
 func estimateUpdate(db *sql.DB, schema, st string, pfSec int, hintTable, hintAlias string) (int64, string, string, bool) {
 	const capN = 300000
 
-	m := reUpdate.FindStringSubmatch(st)
-	if m == nil {
+	tablesPart, setPart, okUpd := splitUpdate(st)
+	if !okUpd {
 		return 0, "", "", false
 	}
-	tablesPart, setPart := m[1], m[2]
 	setPart = cutAtKeyword(setPart, "where")
 	setPart = cutAtKeyword(setPart, "order by")
 	setPart = cutAtKeyword(setPart, "limit")
@@ -2643,11 +2735,14 @@ func parseValuesTuples(rest string) [][]string {
 		rest = rest[:k]
 	}
 	low := strings.ToLower(rest)
-	k := strings.Index(low, "values")
+	k, adv := strings.Index(low, "values"), len("values")
+	if k < 0 { // INSERT ... VALUE (...) 单数写法
+		k, adv = strings.Index(low, "value"), len("value")
+	}
 	if k < 0 {
 		return nil
 	}
-	rs := []rune(rest[k+len("values"):])
+	rs := []rune(rest[k+adv:])
 	var out [][]string
 	for i := 0; i < len(rs); {
 		if rs[i] != '(' {
@@ -2721,7 +2816,7 @@ func insertTolerant(st string) (bool, string) {
 	if strings.HasPrefix(low, "insert ignore") {
 		return true, "IGNORE"
 	}
-	if strings.Contains(low, "on duplicate key update") {
+	if indexTopLevelPhrase(st, "on duplicate key update") >= 0 {
 		return true, "ON DUPLICATE KEY UPDATE"
 	}
 	return false, ""
@@ -2734,8 +2829,12 @@ func parseSetAssignments(rest string) ([]string, [][]string) {
 		return nil, nil
 	}
 	body := strings.TrimSpace(rest)[3:]
+	if k := indexTopLevelPhrase(body, "on duplicate"); k >= 0 {
+		body = body[:k]
+	}
 	var cols, vals []string
-	for _, part := range splitTopLevel(body) {
+	// 必须按值切分（认引号和括号），否则 b='x,y' 会被拆成两段
+	for _, part := range splitValues(body) {
 		eq := indexTopLevel(part, '=')
 		if eq < 0 {
 			continue
@@ -2873,6 +2972,10 @@ type serverVer struct {
 
 func parseServerVer(raw string) serverVer {
 	v := serverVer{raw: raw}
+	// MariaDB 为了兼容老客户端会在前面塞 5.5.5-
+	if strings.Contains(strings.ToLower(raw), "mariadb") && strings.HasPrefix(raw, "5.5.5-") {
+		raw = raw[len("5.5.5-"):]
+	}
 	parts := strings.FieldsFunc(raw, func(r rune) bool {
 		return r == '.' || r == '-' || r == '+' || r == ' '
 	})
@@ -2920,18 +3023,19 @@ func serverVersion(db *sql.DB) serverVer {
 }
 
 // 只有 MySQL 8.0 才有的写法
-func usesMySQL8Only(st string) (string, bool) {
+// 返回特性名和它需要的最低版本
+func usesMySQL8Only(st string) (string, int, int, int, bool) {
 	low := strings.ToLower(strings.TrimSpace(st))
 	if strings.HasPrefix(low, "with ") || strings.HasPrefix(low, "with(") {
-		return "WITH（CTE）", true
+		return "WITH（CTE）", 8, 0, 1, true
 	}
 	if strings.HasPrefix(low, "table ") {
-		return "TABLE 语句", true
+		return "TABLE 语句", 8, 0, 19, true
 	}
 	if strings.HasPrefix(low, "values row") || strings.HasPrefix(low, "values(") {
-		return "VALUES ROW", true
+		return "VALUES ROW", 8, 0, 19, true
 	}
-	return "", false
+	return "", 0, 0, 0, false
 }
 
 func preflight(ds DataSource, stmts []string, verColName string, verPfxs []string) ([]map[string]any, []map[string]any, error) {
@@ -3000,9 +3104,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		st := stripCTE(stRaw)
 		ctes := cteNames(stRaw)
 		// 服务端版本不支持这个语法时，别等执行才报错
-		if feat, is8 := usesMySQL8Only(stRaw); is8 && !sv.atLeast(8, 0, 0) {
+		if feat, mj, mi, pa, is8 := usesMySQL8Only(stRaw); is8 && !sv.atLeast(mj, mi, pa) {
 			add(i, "error", "服务端不支持这个语法",
-				fmt.Sprintf("这条用了 %s，需要 MySQL 8.0 及以上；当前服务端是 %s，执行会直接报语法错误", feat, sv.raw))
+				fmt.Sprintf("这条用了 %s，需要 MySQL %d.%d.%d 及以上；当前服务端是 %s，执行会直接报语法错误", feat, mj, mi, pa, sv.raw))
 		}
 		for _, m := range reBatch.FindAllStringSubmatch(st, -1) {
 			full := strings.ToLower(m[0])
@@ -3021,7 +3125,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			colList := strings.TrimSpace(m[2])
 			add(i, "ok", "目标表", target)
 			fm := reFrom.FindStringSubmatch(m[3])
-			if fm == nil {
+			if fm == nil || strings.HasPrefix(strings.ToLower(strings.TrimSpace(m[3])), "set") {
 				tolerant, tolerantHow := insertTolerant(st)
 				preflightInsertValues(db, schema, i, target, colList, m[3], pfSec, tolerant, tolerantHow, add)
 				continue
@@ -3140,11 +3244,10 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				addD(i, "ok", "无主键冲突", fmt.Sprintf("与 %s 比对无重复", target), durConf)
 			}
 		case stmtKind(st) == "update":
-			m := reUpdate.FindStringSubmatch(st)
-			if m == nil {
+			tablesPart, setPart, okUpd := splitUpdate(st)
+			if !okUpd {
 				continue
 			}
-			tablesPart, setPart := m[1], m[2]
 			setPart = cutAtKeyword(setPart, "where")
 			setPart = cutAtKeyword(setPart, "order by")
 			setPart = cutAtKeyword(setPart, "limit")
@@ -3266,6 +3369,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			})
 
 		case stmtKind(st) == "delete":
+			st = reDeleteMods.ReplaceAllString(st, "delete ")
 			lim := deleteLimit(st)
 			where := whereRaw(st)
 
@@ -3318,6 +3422,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 
 			for _, tg := range targets {
+				if ctes[strings.ToLower(tg)] {
+					continue // CTE 不是真实表
+				}
 				add(i, "ok", "被删除表", tg)
 				targetUse[tg] = append(targetUse[tg], stmtTarget{stmt: i, where: where})
 			}
@@ -4838,10 +4945,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		// 预检是能关的开关，这条防线必须在执行入口自己兜住：
 		// 无条件 DELETE（无 WHERE、无 LIMIT、无 JOIN）直接拒绝。
 		for idx, st := range stmts {
-			if stmtKind(st) == "delete" && whereTail(st) == "" && deleteLimit(st) == 0 &&
-				!reDeleteUsing.MatchString(st) && !reDeleteMulti.MatchString(st) {
+			plain := reDeleteMods.ReplaceAllString(st, "delete ")
+			if stmtKind(plain) == "delete" && whereTail(plain) == "" && deleteLimit(plain) == 0 &&
+				!reDeleteUsing.MatchString(plain) && !reDeleteMulti.MatchString(plain) {
+				hint := "确实要清空请加 LIMIT，或者改用 TRUNCATE"
+				if strings.Contains(strings.ToLower(plain), "partition") {
+					hint = "按分区清空请改用 TRUNCATE TABLE … PARTITION (…)"
+				}
 				writeJSON(w, 400, map[string]any{"ok": false,
-					"error": fmt.Sprintf("第 %d 条是无条件 DELETE，会清空整张表，已拒绝执行；确实要清空请加 LIMIT 或改用 TRUNCATE", idx+1)})
+					"error": fmt.Sprintf("第 %d 条是无条件 DELETE，会清空整张表，已拒绝执行；%s", idx+1, hint)})
 				return
 			}
 		}

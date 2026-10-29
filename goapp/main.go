@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -410,7 +411,26 @@ func loadStore() Store {
 		log.Printf("data.json 读取失败（%v），已进入只读保护，避免覆盖原文件", err)
 		return s
 	}
-	if err := json.Unmarshal(b, &s); err != nil {
+
+	plain := b
+	switch {
+	case bytes.HasPrefix(b, []byte(cfgMagic)):
+		plain, err = openCfg(b)
+		if err != nil {
+			storeCorrupt = true
+			log.Printf("data.json 解开失败（%v），已进入只读保护，避免覆盖原文件", err)
+			return Store{}
+		}
+	case looksLikeJSON(b):
+		// 老版本的明文配置：直接读，下次保存时自动写成密文
+	default:
+		// 既不是密文也不是 JSON：别猜，也不要覆盖它
+		storeCorrupt = true
+		log.Printf("data.json 既不是本程序的加密格式也不是 JSON，已进入只读保护，避免覆盖原文件")
+		return Store{}
+	}
+
+	if err := json.Unmarshal(plain, &s); err != nil {
 		// 文件存在但解析失败：标记为损坏，禁止后续写入覆盖
 		storeCorrupt = true
 		log.Printf("data.json 解析失败（%v），已进入只读保护，避免覆盖原文件", err)
@@ -428,6 +448,16 @@ func saveStore(s Store) error {
 	if err != nil {
 		return err
 	}
+	sealed, err := sealCfg(b)
+	if err != nil {
+		return err
+	}
+	// 先自检一遍：解得回来、且与原文完全一致，才写盘。
+	// 加密写错等于把用户所有脚本和数据源一起丢掉，这一步不能省。
+	if back, err := openCfg(sealed); err != nil || !bytes.Equal(back, b) {
+		return errors.New("配置加密自检失败，已放弃保存以免损坏配置")
+	}
+
 	tmp := dataFile + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -438,7 +468,7 @@ func saveStore(s Store) error {
 	if err := f.Chmod(0o600); err != nil {
 		log.Printf("提示：无法把 %s 权限收紧到 600（%v），保存继续", tmp, err)
 	}
-	if _, err := f.Write(b); err != nil {
+	if _, err := f.Write(sealed); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err
@@ -4332,6 +4362,103 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case r.Method == http.MethodPost && p == "/api/export":
+		var req struct {
+			Scope           string `json:"scope"` // all | ds | group | script
+			ID              string `json:"id"`
+			IncludePassword bool   `json:"includePassword"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		mu.Lock()
+		st := loadStore()
+		corrupt := storeCorrupt
+		mu.Unlock()
+		// 配置读不出来时导出的是一份空壳，别让用户以为备份成功了
+		if corrupt {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "data.json 当前读不出来，现在导出会是空的；请先修复原文件"})
+			return
+		}
+		bundle, err := buildExport(st, req.Scope, req.ID, req.IncludePassword)
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		plain, err := json.Marshal(bundle)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		sealed, err := sealExport(plain)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{
+			"ok":       true,
+			"filename": fmt.Sprintf("medupdate-%s-%s.mhd", req.Scope, time.Now().Format("20060102-1504")),
+			"data":     base64.StdEncoding.EncodeToString(sealed),
+			"counts": map[string]int{
+				"datasources": len(bundle.DataSources),
+				"groups":      len(bundle.Groups),
+				"scripts":     len(bundle.Scripts),
+			},
+		})
+
+	case r.Method == http.MethodPost && p == "/api/import":
+		var req struct {
+			Data    string `json:"data"` // base64
+			Mode    string `json:"mode"` // merge | overwrite
+			Preview bool   `json:"preview"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(req.Data))
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "文件内容读不出来，可能选错了文件"})
+			return
+		}
+		plain, err := openExport(raw)
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		var bundle ExportBundle
+		if err := json.Unmarshal(plain, &bundle); err != nil {
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "导出文件内容解析失败"})
+			return
+		}
+
+		mu.Lock()
+		st := loadStore()
+		next, sum, err := planImport(st, bundle, req.Mode == "overwrite")
+		if err != nil {
+			mu.Unlock()
+			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if req.Preview {
+			mu.Unlock()
+			writeJSON(w, 200, map[string]any{"ok": true, "preview": true, "summary": sum, "exportedAt": bundle.ExportedAt, "appVersion": bundle.AppVersion})
+			return
+		}
+		if storeCorrupt {
+			mu.Unlock()
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "data.json 已损坏，已拒绝写入；请先修复或恢复备份"})
+			return
+		}
+		if err := saveStore(next); err != nil {
+			mu.Unlock()
+			saveFailed(w, err)
+			return
+		}
+		mu.Unlock()
+		writeJSON(w, 200, map[string]any{"ok": true, "summary": sum, "tree": buildTree(next)})
+
 	case r.Method == http.MethodGet && p == "/api/settings":
 		mu.Lock()
 		st := loadStore()
@@ -4481,7 +4608,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			mode = "local"
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "version": appVersion, "build": buildTime,
-			"pid": os.Getpid(), "listenMode": mode, "host": os.Getenv("HOST")})
+			"pid": os.Getpid(), "listenMode": mode, "host": os.Getenv("HOST"), "corrupt": storeCorrupt})
 
 	case r.Method == http.MethodPost && p == "/api/shutdown":
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)

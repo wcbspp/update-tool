@@ -371,7 +371,8 @@
     padding-left:16px;opacity:0;pointer-events:none;transition:opacity .12s;
     background:linear-gradient(90deg, rgba(26,33,44,0) 0%, #1a212c 38%);
     border-radius:0 5px 5px 0}
-  .node:hover .acts,.node.sel .acts{opacity:1;pointer-events:auto}
+  /* 只有选中行显示操作按钮：悬停不再冒出多个按钮组 */
+  .node.sel .acts{opacity:1;pointer-events:auto}
   .node.sel .acts{background:linear-gradient(90deg, rgba(27,44,70,0) 0%, #1b2c46 38%)}
   /* 悬停时把行数/库名往左让一点，避免被按钮压住 */
   .node:hover .sub{opacity:0}

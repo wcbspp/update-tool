@@ -6,6 +6,12 @@ export PATH="$HOME/sdk/go/bin:$PATH"
 export CGO_ENABLED=0
 
 BT=$(date +%Y%m%d-%H%M%S)
+# 版本号只有 goapp/main.go 一个来源，别在脚本里再写死一份
+APPVER="$(sed -n 's/^const appVersion = "\(.*\)".*$/\1/p' main.go | head -1)"
+if [ -z "$APPVER" ]; then
+  echo "读不到 goapp/main.go 里的 const appVersion，检查那行是不是被改过" >&2
+  exit 1
+fi
 FLAGS=(-trimpath -ldflags "-s -w -X main.buildTime=$BT")
 
 echo "→ windows/amd64（无控制台窗口）"
@@ -26,9 +32,9 @@ APP="../dist/update-tool.app"
 if [ -d "$APP" ]; then
   cp ../release-mac/medupdate "$APP/Contents/MacOS/medupdate"
   chmod +x "$APP/Contents/MacOS/medupdate"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.1" "$APP/Contents/Info.plist" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APPVER" "$APP/Contents/Info.plist" >/dev/null
   codesign --force --deep -s - "$APP" >/dev/null 2>&1 || true
-  echo "   app 已同步"
+  echo "   app 已同步（v$APPVER）"
 fi
 
 echo "$BT" > ../build_id.txt

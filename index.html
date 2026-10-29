@@ -661,6 +661,7 @@
 
 
   .sect{display:flex;align-items:center;gap:5px;text-transform:uppercase;cursor:pointer;user-select:none;padding:12px 8px 7px;font-size:12px;color:#a6b6cc;letter-spacing:.3px;}
+  .sect:focus-visible{outline:2px solid #2f4d73;outline-offset:-2px;border-radius:4px;}
 
 
   .crumb{display:flex;align-items:center;gap:6px;height:19px;flex:none;font-size:12.5px;color:#9dabbf;}
@@ -1066,8 +1067,14 @@ async function api(p, o, timeoutMs) {
     throw new Error('无法连接本地服务：程序可能已经退出');
   }
   if (timer) clearTimeout(timer);
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  // 先拿文本再解析：出错时后端（或网关）可能返回非 JSON，只有状态码什么也说明不了
+  const raw = await r.text();
+  let j = {};
+  if (raw) { try { j = JSON.parse(raw); } catch (e) { j = {}; } }
+  if (!r.ok) {
+    const bodyMsg = (j && typeof j.error === 'string' && j.error.trim()) ? j.error.trim() : raw.trim().slice(0, 120);
+    throw new Error(bodyMsg || ('HTTP ' + r.status));
+  }
   return j;
 }
 const post = (p, body) => api(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -1314,20 +1321,47 @@ function highlight(src, caret) {
   return out + esc(src.slice(last));
 }
 
+/* 高亮重绘：大 SQL 每键全量分词会把主线程卡住，这里做三件事
+   1) requestAnimationFrame 合并同一帧内的多次调用；2) 输入法组字期间不重绘；
+   3) 超过 PAINT_MAX 字符直接降级为纯文本，不跑分词。 */
+const PAINT_MAX = 50000;
 let PAINT_SIG = '';
+let PAINT_LINES = 0;
+let PAINT_RAF = 0;
+let IME_BUSY = false;
+
 function paint() {
+  if (IME_BUSY) return;      // 组字中重绘会打断输入法候选
+  if (PAINT_RAF) return;     // 本帧已经排过队了
+  PAINT_RAF = requestAnimationFrame(() => { PAINT_RAF = 0; paintNow(); });
+}
+
+function countLines(src) {
+  let n = 1;
+  for (let i = src.indexOf('\n'); i >= 0; i = src.indexOf('\n', i + 1)) n++;
+  return n;
+}
+
+function paintNow() {
+  if (IME_BUSY) return;
   const ta = $('sql'), src = ta.value;
-  const sig = src.length + '|' + ta.selectionStart + '|' + ta.selectionEnd;
+  const big = src.length > PAINT_MAX;
+  const sig = src.length + '|' + ta.selectionStart + '|' + ta.selectionEnd + (big ? '|big' : '');
   if (sig !== PAINT_SIG || $('hl').dataset.empty === '1') {
     PAINT_SIG = sig;
     $('hl').dataset.empty = '0';
-    $('hl').innerHTML = highlight(src, ta.selectionStart) + '\n';
+    if (big) $('hl').textContent = src + '\n';                     // 降级：纯文本
+    else $('hl').innerHTML = highlight(src, ta.selectionStart) + '\n';
   }
-  const n = src.split('\n').length;
-  let g = '';
-  for (let i = 1; i <= n; i++) g += i + '\n';
-  $('ln').style.whiteSpace = 'pre';
-  $('ln').textContent = g;
+  const n = countLines(src);
+  // 行号只在行数变了才重建，光移光标不重刷
+  if (n !== PAINT_LINES) {
+    PAINT_LINES = n;
+    let g = '';
+    for (let i = 1; i <= n; i++) g += i + '\n';
+    $('ln').style.whiteSpace = 'pre';
+    $('ln').textContent = g;
+  }
   syncScroll();
 }
 
@@ -1371,7 +1405,9 @@ function dialog({ title, fields, okText = '保存', onDelete, extraLabel, onExtr
     if (inputs[0]) setTimeout(() => inputs[0].focus(), 30);
 
     const read = () => { const o = {}; fields.forEach(f => o[f.k] = $('f_' + f.k).value); return o; };
-    const close = v => { $('mask').classList.remove('on'); resolve(v); };
+    /* 关窗顺手摘掉回车处理：#dlg 是共享容器，后面的设置弹窗里没有 #dlgOk，
+       留着上一轮的 onkeydown 会在按回车时抛 TypeError */
+    const close = v => { dlg.onkeydown = null; $('mask').classList.remove('on'); resolve(v); };
     const setMsg = (t, color) => { const box = $('dlgMsg'); if (!box) return; box.textContent = t; box.style.color = color || 'var(--bad)'; };
 
     /* 提交：先本地校验，再（可选）等后端落地；任一步失败都留在窗口里显示原因 */
@@ -1426,9 +1462,11 @@ function dialog({ title, fields, okText = '保存', onDelete, extraLabel, onExtr
     /* 回车：中间字段跳到下一栏，最后一栏才提交；Esc 由全局监听统一处理 */
     dlg.onkeydown = e => {
       if (e.key !== 'Enter') return;
+      const ok = $('dlgOk');
+      if (!ok) return;   // 不是 dialog() 拼的窗，交回默认行为
       const idx = inputs.indexOf(document.activeElement);
       if (idx >= 0 && idx < inputs.length - 1) { e.preventDefault(); inputs[idx + 1].focus(); return; }
-      e.preventDefault(); $('dlgOk').click();
+      e.preventDefault(); ok.click();
     };
   });
 }
@@ -1567,6 +1605,14 @@ function toggleNiuma() {
 
 function toggleSection(k) { openState[k] = openState[k] === false; renderTree(); }
 
+// 分区标题的键盘入口：Enter / 空格跟点击走同一条路径（里面的 ＋ 按钮自己处理按键）
+function sectKey(e, k) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  if (e.target !== e.currentTarget) return;
+  e.preventDefault();
+  toggleSection(k);
+}
+
 function subtreeMatch(g, q) {
   if (!q) return true;
   if ((g.scripts || []).some(x => x.name.toLowerCase().includes(q))) return true;
@@ -1585,7 +1631,7 @@ function renderTree() {
   const dsOpen = openState['ds'] !== false;
   let h = '';
 
-  h += `<div class="sect" onclick="toggleSection('ds')">
+  h += `<div class="sect" role="button" tabindex="0" aria-expanded="${dsOpen ? 'true' : 'false'}" onclick="toggleSection('ds')" onkeydown="sectKey(event,'ds')">
       <span class="chev ${dsOpen ? 'open' : ''}">▶</span><span class="dot ${overallHealth()}"></span>数据源
       <span class="n">${DS.length}</span>
       <button class="add" data-act="editDs" data-arg="" title="新建数据源" data-tip="新建数据源">＋</button>
@@ -1613,7 +1659,7 @@ function renderTree() {
     h += `<div style="height:4px"></div>`;
   }
 
-  h += `<div class="sect" style="cursor:default"><span style="width:11px"></span><span class="dot gray"></span>脚本<span class="n">${Object.keys(IDX.s).length}</span></div>`;
+  h += `<div class="sect" style="cursor:default" role="heading" aria-level="2"><span style="width:11px"></span><span class="dot gray"></span>脚本<span class="n">${Object.keys(IDX.s).length}</span></div>`;
   h += foldersHTML(FOLDERS, 0, q);
   for (const sc of ROOT_SCRIPTS) {
     if (q && !sc.name.toLowerCase().includes(q)) continue;
@@ -1683,7 +1729,11 @@ const ICONS = {
 function iconFor(key) { return ICONS[key[0]] || ''; }
 
 function row({ key, depth, chev, open, ico, label, sub, badge, envBadge, tip, acts, sel }) {
-  return `<div class="node ${sel ? 'sel' : ''}" data-key="${key}" tabindex="0" role="treeitem" title="${esc(tip || label)}" style="padding-left:${4 + depth * 13}px">
+  // 树的可访问性：层级 + 可展开状态都告诉读屏器
+  // depth 是为缩进算的（根层脚本是 0，顶层文件夹是 1），aria-level 按语义层次归一
+  const lvl = Math.max(1, depth || 0);
+  const exp = chev ? ` aria-expanded="${open ? 'true' : 'false'}"` : '';
+  return `<div class="node ${sel ? 'sel' : ''}" data-key="${key}" tabindex="0" role="treeitem" aria-level="${lvl}"${exp} title="${esc(tip || label)}" style="padding-left:${4 + depth * 13}px">
     ${chev ? `<span class="chev ${open ? 'open' : ''}">▶</span>` : '<span class="chev"></span>'}
     <span class="ico">${iconFor(key)}</span>
     <span class="lbl">${esc(label)}</span>
@@ -1694,12 +1744,27 @@ function row({ key, depth, chev, open, ico, label, sub, badge, envBadge, tip, ac
   </div>`;
 }
 
-function closeRowMenu() {
+let ROWMENU_BTN = null;   // 打开菜单的 ⋯ 按钮，Esc 关掉菜单后把焦点还给它
+function closeRowMenu(restore) {
   const m = document.getElementById('rowmenu');
   if (m) m.remove();
   document.removeEventListener('mousedown', rowMenuOutside, true);
+  document.removeEventListener('keydown', rowMenuKey, true);
   window.removeEventListener('scroll', closeRowMenu, true);
   window.removeEventListener('resize', closeRowMenu);
+  // restore 只认严格的 true：scroll/resize 把事件对象当第一个参数传进来，不能当成「还焦点」
+  if (restore === true && ROWMENU_BTN) {
+    // ⋯ 按钮只在悬停/选中时显示；不可见时退回整行，焦点不丢到 body
+    const tgt = ROWMENU_BTN.offsetParent ? ROWMENU_BTN : ROWMENU_BTN.closest('.node');
+    if (tgt && document.contains(tgt)) tgt.focus();
+  }
+  ROWMENU_BTN = null;
+}
+function rowMenuKey(e) {
+  if (e.key !== 'Escape') return;
+  e.preventDefault();
+  e.stopPropagation();
+  closeRowMenu(true);
 }
 function rowMenuOutside(e) {
   const m = document.getElementById('rowmenu');
@@ -1740,6 +1805,8 @@ function rowMenu(key) {
     if (fn) fn(b.dataset.arg);
   });
   document.addEventListener('mousedown', rowMenuOutside, true);
+  document.addEventListener('keydown', rowMenuKey, true);
+  ROWMENU_BTN = btn || null;
   window.addEventListener('scroll', closeRowMenu, true);
   window.addEventListener('resize', closeRowMenu);
 }
@@ -1885,6 +1952,7 @@ async function folderSettings(key) {
   const opts = DS.map(d => `<option value="${d.id}" ${d.id === g.dsId ? 'selected' : ''}>${esc(d.name)} — ${esc(d.user)}@${esc(d.host)}/${esc(d.database || '')}</option>`).join('');
   const dlg = $('dlg');
   dlg.className = 'dlg';
+  dlg.onkeydown = null;   // 清掉上一个弹窗留下的回车处理（这里没有 #dlgOk）
   dlg.innerHTML = `<h3>文件夹设置 · ${esc(g.name)}</h3>
     <label>数据源（这个文件夹下的 SQL 都连它）</label>
     <select id="g_ds"><option value="">（未绑定）</option>${opts}</select>
@@ -1927,6 +1995,7 @@ async function scriptSettings(key) {
 
   const dlg = $('dlg');
   dlg.className = 'dlg';
+  dlg.onkeydown = null;   // 同上：共享 #dlg，先把上一轮的回车处理摘干净
   dlg.innerHTML = '<h3>脚本设置 · ' + esc(sc.name) + '</h3>' +
     (isRoot
       ? '<label>数据源</label><select id="s_ds"><option value="">（未绑定）</option>' + dsOpts + '</select>'
@@ -2090,12 +2159,6 @@ function sync() {
 
 function setEditMode(v) { EDIT_MODE = v; sync(); if (v) $('sql').focus(); }
 function toggleEdit() { setEditMode(!EDIT_MODE); }
-function currentSql() {
-  const ta = $('sql');
-  const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd).trim();
-  return sel || ta.value;
-}
-
 function currentSqlInfo() {
   const ta = $('sql');
   const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd).trim();
@@ -2224,6 +2287,7 @@ function confirmDialog(title, bodyHTML, okText) {
   return new Promise(resolve => {
     const dlg = $('dlg');
     dlg.className = 'dlg';
+    dlg.onkeydown = null;   // 确认框只有 #cOk，不能让 dialog() 的回车处理留在这里
     dlg.innerHTML = `<h3>${esc(title)}</h3>${bodyHTML}
       <div class="foot"><span class="l"></span>
         <button id="cCancel">取消</button>
@@ -2311,7 +2375,8 @@ function renderPreflight(r) {
 async function check() {
   if (!CUR) return;
   if (busyBlocked()) return;
-  const text = currentSql();
+  const info = currentSqlInfo();   // 和执行走同一套取文逻辑：编辑态有选区就只校验选区
+  const text = info.text;
   if (!text.trim()) return toast('没有可校验的 SQL', 'bad');
   const seq = ++ACT_SEQ;
   BUSY = 'check'; sync();
@@ -3049,6 +3114,9 @@ function initResizer() {
   } catch (e) { toast('初始化失败：' + e.message, 'bad'); }
 })();
 
+// 输入法组字期间不重绘，组完再画一次（否则候选词会被打断）
+$('sql').addEventListener('compositionstart', () => { IME_BUSY = true; });
+$('sql').addEventListener('compositionend', () => { IME_BUSY = false; PAINT_SIG = ''; paint(); });
 $('sql').addEventListener('input', () => { dirty = true; PAINT_SIG = ''; paint(); $('btnUnfmt').style.display = 'none'; $('btnUnfmt').disabled = true; fmtPrev = null; });
 ['click', 'keyup', 'select', 'focus'].forEach(ev => $('sql').addEventListener(ev, () => paint()));
 $('sql').addEventListener('keydown', e => {

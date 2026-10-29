@@ -406,6 +406,11 @@ func cstrOverlap(a, b cstr) bool {
 func targetCols(p parsedWhere, targetAlias string, multiStmt bool) (map[string][]cstr, bool) {
 	g := map[string][]cstr{}
 	if targetAlias == "" {
+		// 多表语句但不知道目标表别名：无限定列究竟属于哪张表说不清，
+		// 拿它判「互不重叠」会出假绿灯，宁可判未知
+		if multiStmt {
+			return nil, false
+		}
 		for k, v := range p.cols {
 			base, _ := splitAlias(k)
 			g[base] = append(g[base], v)

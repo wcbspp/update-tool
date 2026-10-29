@@ -90,6 +90,11 @@ func TestCondsOverlapOn(t *testing.T) {
 		{"多表语句无限定列不猜", "CODE='X' AND p.K='1'", "h", "CODE='Y'", "h", true, true, false, false},
 		{"单表无限定列正常判定", "CODE='X'", "h", "CODE='Y'", "h", false, false, false, true},
 		{"多表语句纯无限定列不猜", "POOLAREA_NO='1'", "h", "POOLAREA_NO='2'", "h", true, true, false, false},
+		// DELETE 走这条：多表写法但拿不到目标表别名，无限定列归属不明，不能判互斥
+		{"多表语句别名未知不猜", "POOLAREA_NO='1'", "", "POOLAREA_NO='2'", "", true, true, false, false},
+		{"多表语句别名未知但条件明确", "h.POOLAREA_NO='1'", "", "h.POOLAREA_NO='2'", "", true, true, false, false},
+		// 单表且别名未知（旧路径）行为必须不变
+		{"单表别名未知照常判定", "POOLAREA_NO='1'", "", "POOLAREA_NO='2'", "", false, false, false, true},
 	}
 	for _, c := range cases {
 		ov, known := condsOverlapOn(c.a, c.aliasA, c.multiA, c.b, c.aliasB, c.multiB)

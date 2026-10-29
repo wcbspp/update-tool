@@ -3567,11 +3567,13 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			var targets []string
 			countTable := ""
 			multi := false
+			multiDelete := false // 多表写法：WHERE 里无限定列的归属说不清
 			switch {
 			case reDeleteUsing.MatchString(st):
 				mm := reDeleteUsing.FindStringSubmatch(st)
 				targets = append(targets, mResolveTable(db, schema, normTable(mm[1])))
 				multi = true // USING 的 WHERE 通常引用关联表，单表计数必然失败，走 EXPLAIN
+				multiDelete = true
 			case reDeleteSingle.MatchString(st), reDelete.MatchString(st) && !reDeleteMulti.MatchString(st):
 				// 单表（WHERE 里可以有子查询）
 				m := reDelete.FindStringSubmatch(st)
@@ -3602,6 +3604,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					}
 				}
 				multi = true
+				multiDelete = true
 			default:
 				m := reDelete.FindStringSubmatch(st)
 				if m == nil {
@@ -3616,7 +3619,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					continue // CTE 不是真实表
 				}
 				add(i, "ok", "被删除表", tg)
-				targetUse[tg] = append(targetUse[tg], stmtTarget{stmt: i, where: where})
+				targetUse[tg] = append(targetUse[tg], stmtTarget{stmt: i, where: where, multi: multiDelete})
 			}
 			if multi {
 				add(i, "warn", "多表 DELETE", "按关联条件删除，行数受关联结果影响，预检不做精确统计，请自行确认范围")

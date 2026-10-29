@@ -445,3 +445,188 @@ func TestAPILogsClear(t *testing.T) {
 		t.Fatalf("清空后仍有 %d 条", n)
 	}
 }
+
+/* ---------------- 排序 / 校验 / 诊断 / 退出 / 图标 ---------------- */
+
+// 「上移/下移」按钮：改完顺序要真的写进配置
+func TestAPIOrderMove(t *testing.T) {
+	setupHome(t)
+	mustOK(t, call(t, http.MethodPost, "/api/ds", map[string]any{
+		"name": "库", "host": "127.0.0.1", "port": 3306, "user": "root", "database": "d", "env": "test",
+	}))
+	tree := mustOK(t, call(t, http.MethodGet, "/api/tree", nil))
+	dsID := tree["datasources"].([]any)[0].(map[string]any)["id"].(string)
+
+	mustOK(t, call(t, http.MethodPost, "/api/group", map[string]any{"name": "一", "dsId": dsID}))
+	mustOK(t, call(t, http.MethodPost, "/api/group", map[string]any{"name": "二", "dsId": dsID}))
+
+	tree = mustOK(t, call(t, http.MethodGet, "/api/tree", nil))
+	gs := tree["folders"].([]any)
+	if len(gs) != 2 {
+		t.Fatalf("应有 2 个文件夹，实际 %d", len(gs))
+	}
+	first := gs[0].(map[string]any)
+	second := gs[1].(map[string]any)
+	if first["name"] != "一" {
+		t.Fatalf("初始顺序不对：%v", first["name"])
+	}
+
+	// 把「一」往下移
+	mustOK(t, call(t, http.MethodPost, "/api/order", map[string]any{
+		"kind": "group", "id": first["id"], "dir": 1,
+	}))
+	tree = mustOK(t, call(t, http.MethodGet, "/api/tree", nil))
+	gs = tree["folders"].([]any)
+	if gs[0].(map[string]any)["name"] != "二" {
+		t.Fatalf("下移没生效，第一个还是 %v", gs[0].(map[string]any)["name"])
+	}
+	if gs[1].(map[string]any)["name"] != "一" {
+		t.Fatalf("下移后第二个应为「一」，实际 %v", gs[1].(map[string]any)["name"])
+	}
+	_ = second
+}
+
+// 「语法校验」按钮：忙碌时要被挡，空闲时缺脚本要 404
+func TestAPICheck(t *testing.T) {
+	setupHome(t)
+	rec := call(t, http.MethodPost, "/api/check", map[string]any{"scriptId": "nope", "sql": "SELECT 1"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("不存在的脚本应 404，实际 %d", rec.Code)
+	}
+
+	done, okBusy := tryBeginBusy("执行")
+	if !okBusy {
+		t.Fatal("空闲时应能占锁")
+	}
+	defer done()
+	rec = call(t, http.MethodPost, "/api/check", map[string]any{"scriptId": "x", "sql": "SELECT 1"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("忙碌时校验应 409，实际 %d", rec.Code)
+	}
+}
+
+// 诊断接口默认关闭，不能顺手把库结构暴露出去
+func TestAPIInspectClosedByDefault(t *testing.T) {
+	setupHome(t)
+	rec := call(t, http.MethodGet, "/api/inspect", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("默认应关闭诊断接口（404），实际 %d", rec.Code)
+	}
+}
+
+// 退出只允许本机调用
+func TestAPIShutdownLoopbackOnly(t *testing.T) {
+	setupHome(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/shutdown", nil)
+	req.RemoteAddr = "127.0.0.2:5555"
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("非本机退出应 403，实际 %d", rec.Code)
+	}
+}
+
+// 图标与 favicon 都要能取到，否则浏览器里一片报错
+func TestAPIIcons(t *testing.T) {
+	setupHome(t)
+	for _, p := range []string{"/favicon.ico", "/icon.svg", "/icon-32.png", "/icon-180.png"} {
+		if rec := call(t, http.MethodGet, p, nil); rec.Code != http.StatusOK {
+			t.Fatalf("%s 应 200，实际 %d", p, rec.Code)
+		}
+	}
+}
+
+// 检查更新：网络不通也要给出结构化结果，不能 500
+func TestAPIUpdateCheckShape(t *testing.T) {
+	setupHome(t)
+	mustOK(t, call(t, http.MethodPost, "/api/settings", map[string]any{
+		"updateUrl": "http://127.0.0.1:1/",
+	}))
+	m := mustOK(t, call(t, http.MethodGet, "/api/update/check", nil))
+	if m["enabled"] != true {
+		t.Fatalf("应返回 enabled=true：%v", m)
+	}
+	if _, has := m["error"]; !has {
+		if _, has2 := m["version"]; !has2 {
+			t.Fatalf("既没有 error 也没有 version：%v", m)
+		}
+	}
+}
+
+// 删除文件夹：必须连子文件夹和里面的脚本一起删干净
+func TestAPIDeleteGroupCascade(t *testing.T) {
+	setupHome(t)
+	_, groupID, scriptID := createScript(t)
+
+	// 在文件夹下再建一个子文件夹
+	rec := call(t, http.MethodPost, "/api/group", map[string]any{"name": "子", "parentId": groupID})
+	m := mustOK(t, rec)
+	subs := m["tree"].(map[string]any)["folders"].([]any)[0].(map[string]any)["folders"].([]any)
+	subID := subs[0].(map[string]any)["id"].(string)
+
+	// 空 id 必须被拒绝
+	if rec := call(t, http.MethodDelete, "/api/group?id=", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("空 id 应 400，实际 %d", rec.Code)
+	}
+
+	mustOK(t, call(t, http.MethodDelete, "/api/group?id="+groupID, nil))
+	tree := mustOK(t, call(t, http.MethodGet, "/api/tree", nil))
+	if n := len(tree["folders"].([]any)); n != 0 {
+		t.Fatalf("顶层文件夹应清空，实际 %d 个", n)
+	}
+	raw := call(t, http.MethodGet, "/api/tree", nil).Body.String()
+	if strings.Contains(raw, subID) {
+		t.Fatal("子文件夹没被级联删除")
+	}
+	if strings.Contains(raw, scriptID) {
+		t.Fatal("文件夹里的脚本没被级联删除")
+	}
+	_ = scriptID
+}
+
+// 删除数据源：挂在它上面的文件夹和脚本要一起清掉，不能留孤儿
+func TestAPIDeleteDatasourceCascade(t *testing.T) {
+	setupHome(t)
+	dsID, groupID, scriptID := createScript(t)
+
+	// 空 id 必须拒绝
+	if rec := call(t, http.MethodDelete, "/api/ds?id=", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("空 id 应 400，实际 %d", rec.Code)
+	}
+
+	rec := call(t, http.MethodDelete, "/api/ds?id="+dsID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("删除数据源应 200，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	tree := mustOK(t, call(t, http.MethodGet, "/api/tree", nil))
+	if n := len(tree["datasources"].([]any)); n != 0 {
+		t.Fatalf("数据源没删掉，还剩 %d 个", n)
+	}
+	if n := len(tree["folders"].([]any)); n != 0 {
+		t.Fatalf("挂在数据源上的文件夹没级联删除，还剩 %d 个", n)
+	}
+	raw := call(t, http.MethodGet, "/api/tree", nil).Body.String()
+	if strings.Contains(raw, groupID) {
+		t.Fatal("级联删除后仍能查到文件夹的 id")
+	}
+	// tree 只渲染有归属文件夹的脚本：若升级成「删了文件夹、漏删脚本」，
+	// 孤儿脚本不会出现在 tree 里，光看 tree 会漏判。直接按 id 查。
+	if rec := call(t, http.MethodGet, "/api/script?id="+scriptID, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("脚本没被级联删除，按 id 仍能查到（%d）：%s", rec.Code, rec.Body.String())
+	}
+}
+
+// 「测试连接」按钮：连不上也要给结构化结果，不能 500
+func TestAPIDatasourceTest(t *testing.T) {
+	setupHome(t)
+	rec := call(t, http.MethodPost, "/api/ds/test", map[string]any{
+		"host": "127.0.0.1", "port": 1, "user": "nobody", "database": "nope",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("测试连接应返回 200（带错误说明），实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	m := decode(t, rec)
+	if _, has := m["ok"]; !has {
+		t.Fatalf("应返回 ok 字段：%v", m)
+	}
+}

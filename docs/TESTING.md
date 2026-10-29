@@ -51,6 +51,48 @@ MYSQL_TEST_DSN=... go test -run 'TestSmoke' -v   # 端到端
 | 拦截：跨 MySQL 8.4 / MariaDB 11.6 语法差异 | ✅ | `TestSQLCompatMatrix`、`TestMariaDBVersion` |
 | 性能：大脚本 / 大表 | ✅ | `TestPerfScenarios`、`TestPerfExecute` |
 
+## 按钮 → 用例对照
+
+每个可点功能都必须有用例，且用例要断言**具体字段/具体文案**，不能只看状态码。
+
+| 界面功能 | 接口 | 用例 |
+|---|---|---|
+| 数据预检 | `POST /api/preflight` | 15 个 `TestPreflight*` + `TestPreflightWritesNothing` + `TestPreflightWithReadOnlyAccount` |
+| 执行 | `POST /api/run` | `TestSmoke*`（8 个）、`TestExec*`（8 个） |
+| 语法校验 | `POST /api/check` | `TestAPICheck` |
+| 保存脚本 | `POST /api/script` | `TestAPIScriptCRUD` |
+| 设置（含监听范围） | `GET/POST /api/settings` | `TestAPISettings`、`TestAPISettingsListenModeSwitch` |
+| 执行日志 / 清空 | `GET/DELETE /api/logs` | `TestAPILogsEmpty`、`TestAPILogsClear` |
+| 使用说明 | `GET /guide` | `TestAPIPages` |
+| 版本 / 检查更新 | `GET /api/update/check` | `TestAPIUpdateCheckShape`、`TestEffectiveUpdateURL` |
+| 导出 / 导入 | `POST /api/export`、`/api/import` | `TestAPIExportImport`、`TestPlanImport*`（9 个）、`TestBuildExportScopes` |
+| 新建 / 编辑数据源 | `POST /api/ds` | `TestAPIDatasourceCRUD`、`TestAPIDatasourcePortDefault` |
+| 测试连接 | `POST /api/ds/test` | `TestAPIDatasourceTest` |
+| 删除数据源 | `DELETE /api/ds` | `TestAPIDeleteDatasourceWithChildren` |
+| 新建文件夹 / 子文件夹 | `POST /api/group` | `createScript` 前置、`TestAPIDeleteGroupCascade` |
+| 删除文件夹（级联） | `DELETE /api/group` | `TestAPIDeleteGroupCascade` |
+| 新建 / 删除脚本 | `POST/DELETE /api/script` | `TestAPIScriptCRUD` |
+| 上移 / 下移 | `POST /api/order` | `TestAPIOrderMove` |
+| 退出程序 | `POST /api/shutdown` | `TestAPIShutdownLoopbackOnly` |
+| 下载安装包 | `GET /dl/…` | `TestAPIReleaseDownloadWhitelist` |
+| 诊断接口（默认关闭） | `GET /api/inspect` | `TestAPIInspectClosedByDefault` |
+| 图标 / favicon | `GET /icon*`、`/favicon.ico` | `TestAPIIcons` |
+| 编辑 / 美化 / 还原 / 复制结果 / 折叠 / 搜索 | 纯前端 | 无接口，靠手工验收 |
+
+## 预检「零写入」怎么证明
+
+不靠读代码判断，靠两条可复现的证据：
+
+1. **前后比对**（`TestPreflightWritesNothing`）：预检一个含 `UPDATE`/`INSERT`/`DELETE` 的脚本，把相关表整份 dump（按主键排序、逐行逐列序列化），跑完再 dump 一次，要求一字不差。
+2. **只读账号**（`TestPreflightWithReadOnlyAccount`）：临时建一个只授予 `SELECT` 的 MySQL 账号，用它跑完整预检。用例会先反向确认这个账号确实写不了（写一次必须报权限错误），再要求预检能正常跑完、且不出现任何 `error`。真偷写一句，这里就直接失败。
+
+## 执行「完整性」怎么证明
+
+1. **每条都生效**（`TestExecAppliesEveryStatement`）：五条语句跨两张表，逐条查库确认，并核对返回的受影响行数合计。
+2. **任意位置失败都零残留**（`TestExecFailureAtAnyPositionLeavesNothing`）：把必然失败的语句依次插到第 1～5 位，每次都要求两张表 dump 与执行前完全一致、失败位置准确。
+3. **驱动没有 multiStatements**（`TestDriverRejectsMultiStatements`）：一条 `Exec` 里塞两条语句必须报错，否则事务边界不可靠。
+4. **演练不改数据**（`TestExecDryRunTouchesNothing`）：四条语句全跑一遍，库里零变化。
+
 ## 没覆盖的（已知缺口）
 
 - **单实例接管**（`/api/shutdown` 让旧进程退出后新进程接管）：需要起两个进程，没做自动化。

@@ -454,16 +454,16 @@
   .crumb{color:#9dabbf}
   .crumb b{color:#ffffff}
   .ed{background:#04060a;border-color:#313d4f}
-  .hl{color:#c6d2e2}
-  .c{color:#7f8ba0}
-  .k{color:#6fa8ff}
-  .s{color:#9ed47a}
-  .n{color:#f0b46a}
-  .f{color:#62d3c8}
-  .tb{color:#e3a6ff}
-  .co{color:#8fd7e8}
-  .p{color:#5b6a80}
-  .hit{background:#2b4a72;color:#ffffff;border-radius:3px;box-shadow:0 0 0 1px #3c6ea8}
+  .hl{color:#e2ebf7}
+  .c{color:#8d9bb5;font-style:italic}
+  .k{color:#ff7ab2;font-weight:700}
+  .s{color:#a8f07c}
+  .n{color:#ffab5e}
+  .f{color:#42e8d0}
+  .tb{color:#c996ff;font-weight:600}
+  .co{color:#5ee0ff}
+  .p{color:#9fb0c9}
+  .hit{background:#3b76e0;color:#ffffff;border-radius:3px;box-shadow:0 0 0 1px #6ea8ff}
   .res{background:#070a10;border-color:#313d4f}
   .rhead{background:linear-gradient(180deg,#111a26,#0b1119);border-bottom-color:#39465b}
   .chk-t{color:#eef4fd}
@@ -797,35 +797,70 @@ function insertStructures(toks) {
   return list;
 }
 
-// 光标落在某个 VALUES 元组里时，返回对应列名 token 与当前值 token
+// 光标落在 VALUES 的某个值 / INSERT..SELECT 的某个选列上时，返回对应的插入列
 function valueLink(toks, st, caret) {
-  let k = st.after, v = -1;
+  let k = st.after, mode = '';
   for (; k < toks.length; k++) {
     const tk = toks[k];
-    if (tk.t === 'w' && tk.s.toUpperCase() === 'VALUES') { v = k; break; }
-    if (tk.t === 'w' && tk.s.toUpperCase() === 'INSERT') return null;
+    if (tk.t === 'w') {
+      const up = tk.s.toUpperCase();
+      if (up === 'VALUES') { mode = 'values'; k++; break; }
+      if (up === 'SELECT') { mode = 'select'; k++; break; }
+      if (up === 'INSERT') return null;
+    }
     if (tk.t === 'p' && tk.s === ';') return null;
   }
-  if (v < 0) return null;
-  for (k = v + 1; k < toks.length; k++) {
-    const tk = toks[k];
-    if (tk.t === 'p' && tk.s === ';') return null;
-    if (tk.t === 'w' && tk.s.toUpperCase() === 'INSERT') return null;
-    if (!(tk.t === 'p' && tk.s === '(')) continue;
-    const close = matchParen(toks, k);
-    if (close < 0) return null;
-    if (caret >= tk.i && caret <= toks[close].j) {
-      let d = 0, idx = 0;
-      for (let x = k; x <= close; x++) {
-        const t2 = toks[x];
-        if (t2.t === 'p' && t2.s === '(') d++;
-        else if (t2.t === 'p' && t2.s === ')') d--;
-        else if (d === 1 && t2.t === 'p' && t2.s === ',' && t2.i < caret) idx++;
+  if (!mode) return null;
+
+  if (mode === 'values') {
+    for (; k < toks.length; k++) {
+      const tk = toks[k];
+      if (tk.t === 'p' && tk.s === ';') return null;
+      if (tk.t === 'w' && tk.s.toUpperCase() === 'INSERT') return null;
+      if (!(tk.t === 'p' && tk.s === '(')) continue;
+      const close = matchParen(toks, k);
+      if (close < 0) return null;
+      if (caret >= tk.i && caret <= toks[close].j) {
+        let d = 0, idx = 0;
+        for (let x = k; x <= close; x++) {
+          const t2 = toks[x];
+          if (t2.t === 'p' && t2.s === '(') d++;
+          else if (t2.t === 'p' && t2.s === ')') d--;
+          else if (d === 1 && t2.t === 'p' && t2.s === ',' && t2.i < caret) idx++;
+        }
+        if (idx >= st.cols.length) return null;
+        return { col: st.cols[idx] };
       }
-      if (idx >= st.cols.length) return null;
-      return { col: st.cols[idx] };
+      k = close;
     }
-    k = close;
+    return null;
+  }
+
+  // INSERT ... SELECT：按顶层逗号切选列，光标所在的第 n 个选列对应第 n 个插入列
+  let d = 0, startTok = k, endTok = k;
+  const ranges = [];
+  for (; k < toks.length; k++) {
+    const tk = toks[k];
+    if (tk.t === 'p' && tk.s === '(') d++;
+    else if (tk.t === 'p' && tk.s === ')') d--;
+    else if (d === 0 && ((tk.t === 'p' && tk.s === ',') || (tk.t === 'w' && /^(FROM|INSERT|UNION)$/.test(tk.s.toUpperCase())) || (tk.t === 'p' && tk.s === ';'))) {
+      ranges.push([startTok, endTok]);
+      if (!(tk.t === 'p' && tk.s === ',')) break;
+      startTok = endTok = k + 1;
+      continue;
+    }
+    if (toks[k].t !== 'p' || toks[k].s !== ',') endTok = k;
+  }
+  if (ranges.length && endTok >= startTok && endTok < toks.length) {
+    if (!ranges.length || ranges[ranges.length - 1][1] < startTok) ranges.push([startTok, endTok]);
+  }
+  for (let n = 0; n < ranges.length; n++) {
+    const a = toks[ranges[n][0]], b = toks[ranges[n][1]];
+    if (!a || !b) continue;
+    if (caret >= a.i && caret <= b.j) {
+      if (n >= st.cols.length) return null;
+      return { col: st.cols[n] };
+    }
   }
   return null;
 }

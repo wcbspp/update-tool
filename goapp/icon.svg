@@ -1,13 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#5aa9ff"/>
-      <stop offset="1" stop-color="#22d3ee"/>
+    <linearGradient id="head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbeed2"/>
+      <stop offset="1" stop-color="#e2a94f"/>
     </linearGradient>
   </defs>
-  <rect x="0" y="0" width="512" height="512" rx="116" fill="#0b1220"/>
-  <rect x="22" y="22" width="468" height="468" rx="96" fill="none" stroke="url(#ring)" stroke-width="26"/>
-  <path d="M256 116 V296" stroke="#ffffff" stroke-width="54" stroke-linecap="round"/>
-  <path d="M178 232 L256 310 L334 232" fill="none" stroke="#ffffff" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M148 392 H364" stroke="url(#ring)" stroke-width="48" stroke-linecap="round"/>
+  <rect width="512" height="512" rx="116" fill="#101826"/>
+
+  <!-- 牛角：从头两侧向外上方收尖 -->
+  <path d="M200 198 C158 180 118 148 94 100 C138 114 186 144 216 184 Z" fill="url(#head)"/>
+  <path d="M312 198 C354 180 394 148 418 100 C374 114 326 144 296 184 Z" fill="url(#head)"/>
+
+  <!-- 耳朵 -->
+  <path d="M188 216 C160 212 136 224 126 248 C152 244 176 234 194 226 Z" fill="url(#head)"/>
+  <path d="M324 216 C352 212 376 224 386 248 C360 244 336 234 318 226 Z" fill="url(#head)"/>
+
+  <!-- 头与吻部 -->
+  <path d="M256 168 C312 168 342 212 342 270 C342 334 306 384 256 384 C206 384 170 334 170 270 C170 212 200 168 256 168 Z" fill="url(#head)"/>
+  <ellipse cx="256" cy="344" rx="68" ry="44" fill="url(#head)"/>
+
+  <!-- 眼与鼻 -->
+  <ellipse cx="222" cy="272" rx="12" ry="14" fill="#101826"/>
+  <ellipse cx="290" cy="272" rx="12" ry="14" fill="#101826"/>
+  <ellipse cx="236" cy="348" rx="8" ry="9" fill="#101826" opacity=".75"/>
+  <ellipse cx="276" cy="348" rx="8" ry="9" fill="#101826" opacity=".75"/>
 </svg>

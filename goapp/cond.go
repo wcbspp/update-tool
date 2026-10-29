@@ -204,7 +204,8 @@ func parseAtom(a string) (col string, c cstr, ok bool) {
 		op := strings.Index(up, " LIKE ")
 		col = normCol(a[:op])
 		pre := strings.TrimSuffix(strings.Trim(normVal(a[op+6:]), "'\""), "%")
-		if col == "" || pre == "" {
+		// 前缀里还有 % 或 _ 就是通配符，不能当字面量比较，否则会误判「互不重叠」
+		if col == "" || pre == "" || strings.ContainsAny(pre, "_%") {
 			return "", cstr{}, false
 		}
 		return col, cstr{lo: bound{pre, true, true}, hi: bound{pre + "\uffff", true, true}}, true

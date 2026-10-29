@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -401,7 +402,14 @@ func loadStore() Store {
 	var s Store
 	b, err := os.ReadFile(dataFile)
 	if err != nil {
-		storeCorrupt = false
+		// 只有「文件不存在」才算第一次启动；读失败（权限、磁盘）必须进只读保护，
+		// 否则下一次保存会把整份配置覆盖成空
+		if errors.Is(err, fs.ErrNotExist) {
+			storeCorrupt = false
+			return s
+		}
+		storeCorrupt = true
+		log.Printf("data.json 读取失败（%v），已进入只读保护，避免覆盖原文件", err)
 		return s
 	}
 	if err := json.Unmarshal(b, &s); err != nil {
@@ -503,6 +511,15 @@ func splitStatements(text string) []string {
 			if c == '\'' && n == '\'' {
 				buf.WriteString("''")
 				i++
+				continue
+			}
+			if c == '\\' {
+				// MySQL 默认 NO_BACKSLASH_ESCAPES=off，'O\'Brien' 里的反斜杠是转义符
+				buf.WriteRune(c)
+				if i+1 < len(rs) {
+					i++
+					buf.WriteRune(rs[i])
+				}
 				continue
 			}
 			if c == '\'' {
@@ -890,8 +907,13 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": "事务语句，已跳过"})
 			continue
 		}
-		if isDDL(st) {
-			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": "DDL 无法静态校验"})
+		if isDDL(st) || isQuery(st) {
+			// SHOW / DESC / TABLE 前面加 EXPLAIN 会被 MySQL 判成语法错误，这类不校验
+			note := "DDL 无法静态校验"
+			if !isDDL(st) {
+				note = "SHOW / DESC 类语句无法用 EXPLAIN 校验"
+			}
+			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": note})
 			continue
 		}
 		rows, err := db.Query("EXPLAIN " + st)
@@ -909,7 +931,7 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 /* ---------------- 体检（DML 预检） ---------------- */
 
 var (
-	reInsert = regexp.MustCompile(`(?is)^\s*insert\s+(?:ignore\s+)?into\s+[\x60"]?([\w$.]+)[\x60"]?\s*(?:\(([^)]*)\))?\s*(select\b.*)$`)
+	reInsert = regexp.MustCompile(`(?is)^\s*insert\s+(?:ignore\s+)?into\s+[\x60"]?([\w$.]+)[\x60"]?\s*(?:\(([^)]*)\))?\s*((?:select|values)\b.*)$`)
 	reFrom   = regexp.MustCompile(`(?is)\bfrom\s+[\x60"]?([\w$.]+)[\x60"]?`)
 	reUpdate = regexp.MustCompile(`(?is)^\s*update\s+(.+?)\s+set\s+(.+)$`)
 	reDelete = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)`)
@@ -921,6 +943,7 @@ var (
 	reDeleteUsing  = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)[\x60"]?\s+using\s+`)
 	reIdent        = regexp.MustCompile(`^[\x60"]?([\w$.]+)[\x60"]?`)
 	reBatch        = regexp.MustCompile(`(?i)([A-Za-z0-9_]+)_update_([A-Za-z0-9]+)`)
+	reIdentTok     = regexp.MustCompile("[A-Za-z_][A-Za-z0-9_$]*(?:\\.[A-Za-z_][A-Za-z0-9_$]*)?|,")
 )
 
 // 5.6 / Linux 下表名区分大小写，先按不区分大小写解析出真实表名
@@ -1805,24 +1828,30 @@ func versionReport(db *sql.DB, schema string, tables []string, col string, pfxs 
 		}
 		match := "(" + strings.Join(conds, " OR ") + ")"
 
-		pick := func(where string, limit int) []string {
+		pick := func(where string, limit int) ([]string, error) {
 			q := fmt.Sprintf("SELECT DISTINCT %s FROM %s WHERE %s AND %s IS NOT NULL LIMIT %d",
 				quoteIdent(col), qualTable(schema, t), where, quoteIdent(col), limit)
 			ctx, cancel := pfCtx(pfSec)
 			defer cancel()
 			rows, err := db.QueryContext(ctx, q)
 			if err != nil {
-				return nil
+				return nil, err
 			}
 			defer rows.Close()
-			return scanVals(rows)
+			return scanVals(rows), nil
 		}
 
-		okVals := pick(match, 21)
-		otherVals := pick("NOT "+match, 11)
-		out = append(out, map[string]any{
+		okVals, okErr := pick(match, 21)
+		otherVals, _ := pick("NOT "+match, 11)
+		item := map[string]any{
 			"table": t, "field": col, "ok": okVals, "other": otherVals, "missing": false,
-		})
+		}
+		if okErr != nil {
+			// 超时、无权限不能当成「这批没有版本号」
+			item["err"] = "读取失败：" + okErr.Error()
+			item["ok"] = []string{}
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -2059,6 +2088,41 @@ func explainIndexes(db *sql.DB, q string) string {
 	return strings.Join(parts, " + ")
 }
 
+// DELETE t1, t2 FROM t1 JOIN t2 ... ：把别名映射回真实表名
+func aliasToTable(st string) map[string]string {
+	low := strings.ToLower(st)
+	k := strings.Index(low, " from ")
+	if k < 0 {
+		return nil
+	}
+	rest := st[k+6:]
+	for _, kw := range []string{"where", "group", "order", "limit", "having"} {
+		rest = cutAtKeyword(rest, kw)
+	}
+	out := map[string]string{}
+	skip := map[string]bool{"join": true, "left": true, "right": true, "inner": true, "outer": true,
+		"cross": true, "straight_join": true, "on": true, "using": true, "as": true, "natural": true}
+	cur := ""
+	for _, tk := range reIdentTok.FindAllString(rest, -1) {
+		l := strings.ToLower(tk)
+		if tk == "," || l == "join" {
+			cur = ""
+			continue
+		}
+		if skip[l] {
+			continue
+		}
+		if cur == "" {
+			cur = tk
+			out[strings.ToUpper(trimIdent(tk))] = tk
+			continue
+		}
+		out[strings.ToUpper(trimIdent(tk))] = cur
+		cur = ""
+	}
+	return out
+}
+
 func estimateUpdate(db *sql.DB, schema, st string, pfSec int, hintTable, hintAlias string) (int64, string, string, bool) {
 	const capN = 300000
 
@@ -2114,7 +2178,11 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int, hintTable, hintAli
 	var n int64
 	ctx, cancel := pfCtx(pfSec)
 	defer cancel()
+	lim := deleteLimit(st)
 	if err := db.QueryRowContext(ctx, q).Scan(&n); err == nil {
+		if lim > 0 && n > lim {
+			n = lim
+		}
 		if n > capN {
 			return capN, "cap", explainIndexes(db, q), true
 		}
@@ -2123,6 +2191,9 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int, hintTable, hintAli
 
 	// 数不出来（超时/太复杂）→ 用执行计划给个量级
 	if n2, ok := estimateByExplain(db, st, table, alias); ok {
+		if lim > 0 && n2 > lim {
+			n2 = lim
+		}
 		return n2, "explain", "", true
 	}
 	return 0, "", "", false
@@ -2337,6 +2408,253 @@ func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 	return out
 }
 
+// 解析 INSERT ... VALUES 的常量元组（返回每个括号组里的顶层值文本）
+
+// 按顶层逗号切值，字符串和括号里的逗号不算
+func splitValues(s string) []string {
+	var out []string
+	var buf strings.Builder
+	depth := 0
+	inS, inD, inBt := false, false, false
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		if inS {
+			buf.WriteRune(c)
+			if c == '\\' && i+1 < len(rs) {
+				i++
+				buf.WriteRune(rs[i])
+				continue
+			}
+			if c == '\'' {
+				if i+1 < len(rs) && rs[i+1] == '\'' {
+					i++
+					buf.WriteRune(rs[i])
+					continue
+				}
+				inS = false
+			}
+			continue
+		}
+		if inD {
+			buf.WriteRune(c)
+			if c == '"' {
+				inD = false
+			}
+			continue
+		}
+		if inBt {
+			buf.WriteRune(c)
+			if c == '`' {
+				inBt = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inS = true
+			buf.WriteRune(c)
+		case '"':
+			inD = true
+			buf.WriteRune(c)
+		case '`':
+			inBt = true
+			buf.WriteRune(c)
+		case '(':
+			depth++
+			buf.WriteRune(c)
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			buf.WriteRune(c)
+		case ',':
+			if depth == 0 {
+				out = append(out, buf.String())
+				buf.Reset()
+				continue
+			}
+			buf.WriteRune(c)
+		default:
+			buf.WriteRune(c)
+		}
+	}
+	out = append(out, buf.String())
+	return out
+}
+
+func parseValuesTuples(rest string) [][]string {
+	low := strings.ToLower(rest)
+	if k := strings.Index(low, "on duplicate"); k >= 0 {
+		rest = rest[:k]
+		low = low[:k]
+	}
+	k := strings.Index(low, "values")
+	if k < 0 {
+		return nil
+	}
+	rs := []rune(rest[k+len("values"):])
+	var out [][]string
+	for i := 0; i < len(rs); {
+		if rs[i] != '(' {
+			i++
+			continue
+		}
+		depth, inS, inD, inBt, closed, j := 0, false, false, false, false, i
+		for ; j < len(rs); j++ {
+			c := rs[j]
+			if inS {
+				if c == '\\' {
+					j++
+					continue
+				}
+				if c == '\'' {
+					if j+1 < len(rs) && rs[j+1] == '\'' {
+						j++
+						continue
+					}
+					inS = false
+				}
+				continue
+			}
+			if inD {
+				if c == '"' {
+					inD = false
+				}
+				continue
+			}
+			if inBt {
+				if c == '`' {
+					inBt = false
+				}
+				continue
+			}
+			switch c {
+			case '\'':
+				inS = true
+			case '"':
+				inD = true
+			case '`':
+				inBt = true
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					closed = true
+				}
+			}
+			if closed {
+				break
+			}
+		}
+		if !closed {
+			break
+		}
+		out = append(out, splitValues(string(rs[i+1:j])))
+		i = j + 1
+	}
+	return out
+}
+
+// INSERT ... VALUES 的预检：行数 + 主键冲突（列清单里要有完整主键才判）
+func preflightInsertValues(db *sql.DB, schema string, i int, target, colList, rest string, pfSec int, add func(int, string, string, string)) {
+	tuples := parseValuesTuples(rest)
+	if len(tuples) == 0 {
+		add(i, "warn", "无法解析 VALUES", "没能拆出具体的值列表，只确认了目标表存在；请人工核对")
+		return
+	}
+	add(i, "ok", "预计影响行数", fmt.Sprintf("常量列表共 %d 行", len(tuples)))
+
+	pk, idxName := mKeyCols(db, schema, target)
+	if len(pk) == 0 {
+		add(i, "warn", "目标表无主键或唯一索引", fmt.Sprintf("%s 既没有主键也没有唯一索引，重复执行会插入重复数据", target))
+		return
+	}
+	if strings.TrimSpace(colList) == "" {
+		add(i, "warn", "判重未做", "这条 INSERT 没有列清单（INSERT INTO t VALUES ...），无法确定每列对应哪个字段；请确认这批是否已执行过")
+		return
+	}
+	cols := splitTopLevel(colList)
+	pos := map[string]int{}
+	for idx, c := range cols {
+		pos[strings.ToUpper(trimIdent(strings.TrimSpace(c)))] = idx
+	}
+	var missing []string
+	for _, c := range pk {
+		if _, ok := pos[strings.ToUpper(c)]; !ok {
+			missing = append(missing, c)
+		}
+	}
+	if len(missing) > 0 {
+		add(i, "warn", "判重未做自动比对", fmt.Sprintf("列清单里没有主键/唯一键列 %s，无法判断这批是否已插入过", strings.Join(missing, ", ")))
+		return
+	}
+	if !strings.EqualFold(idxName, "PRIMARY") {
+		add(i, "ok", "使用唯一索引判重", fmt.Sprintf("%s 无主键，改用唯一索引 %s（%s）", target, idxName, strings.Join(pk, ", ")))
+	}
+
+	// 值个数要和列清单对得上，否则执行时会报错
+	for n, t := range tuples {
+		if len(t) != len(cols) {
+			add(i, "error", "列数不匹配", fmt.Sprintf("第 %d 组值有 %d 个，列清单有 %d 个，执行会直接报错", n+1, len(t), len(cols)))
+			return
+		}
+	}
+
+	// 值列表内部自身重复
+	seen := map[string]bool{}
+	var dupInList int
+	for _, t := range tuples {
+		parts := make([]string, 0, len(pk))
+		for _, c := range pk {
+			parts = append(parts, strings.TrimSpace(t[pos[strings.ToUpper(c)]]))
+		}
+		k := strings.Join(parts, "\x00")
+		if seen[k] {
+			dupInList++
+		}
+		seen[k] = true
+	}
+	if dupInList > 0 {
+		add(i, "error", "值列表内部重复", fmt.Sprintf("有 %d 组值的主键完全相同，执行会直接报主键冲突", dupInList))
+	}
+
+	limit := len(tuples)
+	if limit > 500 {
+		limit = 500
+	}
+	plist := make([]string, 0, limit)
+	for _, t := range tuples[:limit] {
+		vals := make([]string, 0, len(pk))
+		for _, c := range pk {
+			vals = append(vals, strings.TrimSpace(t[pos[strings.ToUpper(c)]]))
+		}
+		plist = append(plist, "("+strings.Join(vals, ",")+")")
+	}
+	keys := make([]string, 0, len(pk))
+	for _, c := range pk {
+		keys = append(keys, quoteIdent(c))
+	}
+	q := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE (%s) IN (%s)", qualTable(schema, target), strings.Join(keys, ","), strings.Join(plist, ","))
+	ctx, cancel := pfCtx(pfSec)
+	defer cancel()
+	var exists int64
+	if err := db.QueryRowContext(ctx, q).Scan(&exists); err != nil {
+		add(i, "warn", "主键冲突检查未完成", withHint(err.Error()))
+		return
+	}
+	note := ""
+	if limit < len(tuples) {
+		note = fmt.Sprintf("（只比对了前 %d 组）", limit)
+	}
+	if exists > 0 {
+		add(i, "error", "主键冲突", fmt.Sprintf("%s 里已经有 %d 行同主键的数据，执行会失败并整批回滚%s", target, exists, note))
+	} else {
+		add(i, "ok", "无主键冲突", fmt.Sprintf("与 %s 比对无重复%s", target, note))
+	}
+}
+
 func preflight(ds DataSource, stmts []string, verColName string, verPfxs []string) ([]map[string]any, []map[string]any, error) {
 	db, err := openDB(ds)
 	if err != nil {
@@ -2393,6 +2711,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	batchTables := make([]string, 0)
 	seenTable := map[string]bool{}
 	for i, st := range stmts {
+		checksBefore := len(out)
 		for _, m := range reBatch.FindAllStringSubmatch(st, -1) {
 			full := strings.ToLower(m[0])
 			if !seenTable[full] {
@@ -2411,7 +2730,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			add(i, "ok", "目标表", target)
 			fm := reFrom.FindStringSubmatch(m[3])
 			if fm == nil {
-				add(i, "warn", "逐个值插入", "INSERT ... VALUES：行数由常量列表决定，预检不做数据比对")
+				preflightInsertValues(db, schema, i, target, colList, m[3], pfSec, add)
 				continue
 			}
 			src := mResolveTable(db, schema, normTable(fm[1]))
@@ -2666,9 +2985,13 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					countTable = targets[0]
 					break
 				}
+				am := aliasToTable(st)
 				for _, part := range splitTopLevel(mm[1]) {
 					if t, _ := parseTableRef(part); t != "" {
-						targets = append(targets, mResolveTable(db, schema, t))
+						if real, ok := am[strings.ToUpper(trimIdent(t))]; ok {
+							t = real
+						}
+						targets = append(targets, mResolveTable(db, schema, normTable(t)))
 					}
 				}
 				multi = true
@@ -2692,15 +3015,22 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 			}
 			if whereTail(st) == "" {
-				if lim > 0 {
+				switch {
+				case lim > 0:
 					add(i, "warn", "没有 WHERE 条件", fmt.Sprintf("这条 DELETE 没有 WHERE，按 LIMIT %d 最多删 %d 行，请确认不是笔误", lim, lim))
-				} else {
-					add(i, "warn", "没有 WHERE 条件", "这条 DELETE 会清空整张表，请确认不是笔误")
+				case multi || strings.Contains(strings.ToUpper(st), " JOIN "):
+					add(i, "warn", "没有 WHERE 条件", "这条 DELETE 的删除范围由 JOIN 条件决定，请确认关联范围")
+				default:
+					add(i, "error", "没有 WHERE 条件", "这条 DELETE 会清空整张表，已阻止执行；确实要清空请加 LIMIT 或改成 TRUNCATE")
 				}
 			}
 			if countTable != "" {
 				delPending = append(delPending, delTask{i: i, stmt: st, table: countTable, where: where, lim: lim})
 			}
+		}
+		// 一条检查都没产生的语句（WITH …、REPLACE、SHOW 等）不能静默显示「预检通过」
+		if len(out) == checksBefore {
+			add(i, "warn", "预检未覆盖", fmt.Sprintf("这条语句（%s）工具暂时无法预检，请人工核对执行范围", stmtKind(st)))
 		}
 	}
 
@@ -2926,8 +3256,42 @@ func fetchVersion(base string, fresh bool) (map[string]any, error) {
 	return v, nil
 }
 
+var (
+	busyMu   sync.Mutex
+	busyKind string
+)
+
+// 执行 / 预检 / 校验期间禁止改配置，避免删掉正在跑的脚本
+func beginBusy(kind string) func() {
+	busyMu.Lock()
+	busyKind = kind
+	busyMu.Unlock()
+	return func() {
+		busyMu.Lock()
+		busyKind = ""
+		busyMu.Unlock()
+	}
+}
+
+func busyNow() string {
+	busyMu.Lock()
+	defer busyMu.Unlock()
+	return busyKind
+}
+
+func isConfigWrite(p, method string) bool {
+	if method != http.MethodPost && method != http.MethodDelete {
+		return false
+	}
+	switch p {
+	case "/api/ds", "/api/group", "/api/script", "/api/order":
+		return true
+	}
+	return false
+}
+
 func saveFailed(w http.ResponseWriter, err error) {
-	saveFailed(w, err)
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "保存失败：" + err.Error()})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -2958,7 +3322,13 @@ func appendLog(entry map[string]any) {
 	}
 	logMu.Lock()
 	defer logMu.Unlock()
-	f, err := os.OpenFile(filepath.Join(logsDir, "run-log.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	path := filepath.Join(logsDir, "run-log.jsonl")
+	// 超过 8MB 就轮转一份，避免日志无限增长
+	if st, err := os.Stat(path); err == nil && st.Size() > 8<<20 {
+		_ = os.Remove(path + ".1")
+		_ = os.Rename(path, path+".1")
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}
@@ -2996,6 +3366,21 @@ func readLogTail(maxBytes int64) ([]byte, error) {
 	return b, nil
 }
 
+// hostAllowed：只放行本机与局域网地址
+func hostAllowed(host string, extra []string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	switch h {
+	case "localhost", "127.0.0.1", "::1", "[::1]":
+		return true
+	}
+	for _, ip := range extra {
+		if strings.EqualFold(ip, h) {
+			return true
+		}
+	}
+	return false
+}
+
 func openBrowser(u string) {
 	if os.Getenv("NO_OPEN") == "1" {
 		return
@@ -3009,7 +3394,9 @@ func openBrowser(u string) {
 	default:
 		cmd = exec.Command("xdg-open", u)
 	}
-	_ = cmd.Start()
+	if err := cmd.Start(); err == nil {
+		go func() { _ = cmd.Wait() }()
+	}
 }
 
 func lineCount(sqlText string) int {
@@ -3151,6 +3538,12 @@ func findScriptByID(s Store, id string) (Script, bool) {
 func handler(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 
+	// 执行 / 预检进行中不允许改配置（删脚本、改数据源等），否则会动到正在跑的脚本
+	if k := busyNow(); k != "" && isConfigWrite(p, r.Method) {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + k + "，先等它结束再改脚本/文件夹/数据源"})
+		return
+	}
+
 	// 页面
 	// 下载三平台安装包（白名单，不接受任意路径）
 	if r.Method == http.MethodGet && strings.HasPrefix(p, "/dl/") {
@@ -3281,6 +3674,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case r.Method == http.MethodGet && p == "/api/inspect":
+		// 诊断端点：默认关闭，需要 DEBUG_API=1 才开，避免顺手暴露库结构
+		if os.Getenv("DEBUG_API") != "1" {
+			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "诊断接口已关闭（设置 DEBUG_API=1 可开启）"})
+			return
+		}
 		// 诊断：看看这台库上的索引元数据能不能读到
 		mu.Lock()
 		st := loadStore()
@@ -3919,6 +4317,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}})
 
 	case r.Method == http.MethodPost && p == "/api/preflight":
+		if k := busyNow(); k != "" {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + k + "，先等它结束"})
+			return
+		}
+		doneBusy := beginBusy("预检")
+		defer doneBusy()
 		var b struct {
 			ScriptID string `json:"scriptId"`
 			SQL      string `json:"sql"`
@@ -3999,6 +4403,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": !hasErr, "checks": checks, "versions": versions, "count": len(stmts), "previews": previews, "ms": time.Since(pfStart).Milliseconds()})
 
 	case r.Method == http.MethodPost && p == "/api/check":
+		if k := busyNow(); k != "" {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + k + "，先等它结束"})
+			return
+		}
+		doneBusy := beginBusy("语法校验")
+		defer doneBusy()
 		var b struct {
 			ScriptID string `json:"scriptId"`
 			SQL      string `json:"sql"`
@@ -4043,6 +4453,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			"previews": previews, "ms": time.Since(chkStart).Milliseconds()})
 
 	case r.Method == http.MethodPost && p == "/api/run":
+		if k := busyNow(); k != "" {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + k + "，先等它结束"})
+			return
+		}
+		doneBusy := beginBusy("执行")
+		defer doneBusy()
 		var b struct {
 			ScriptID string           `json:"scriptId"`
 			SQL      string           `json:"sql"`
@@ -4277,7 +4693,11 @@ func ensureInstance(port string) bool {
 	}
 	fmt.Printf("  检测到旧版本 v%s 正在运行，正在让它退出…\n", ver)
 	c := &http.Client{Timeout: 3 * time.Second}
-	if resp, err := c.Post("http://127.0.0.1:"+port+"/api/shutdown", "application/json", nil); err == nil {
+	shutdownURL := "http://127.0.0.1:" + port + "/api/shutdown"
+	if key := os.Getenv("ACCESS_KEY"); key != "" && key != "off" {
+		shutdownURL += "?k=" + key
+	}
+	if resp, err := c.Post(shutdownURL, "application/json", nil); err == nil {
 		resp.Body.Close()
 	}
 	for i := 0; i < 60; i++ {
@@ -4342,16 +4762,43 @@ func main() {
 	}
 
 	var h http.Handler = http.HandlerFunc(handler)
+	// 只接受本机 / 局域网 Host，挡掉 DNS rebinding 把请求伪装成同源的玩法
+	extraHosts := lanIPs()
+	base := h
+	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if hp, _, err := net.SplitHostPort(r.Host); err == nil {
+			host = hp
+		}
+		if !hostAllowed(host, extraHosts) {
+			http.Error(w, "403 只允许本机或局域网访问", http.StatusForbidden)
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/") {
+			ct := r.Header.Get("content-type")
+			if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+				http.Error(w, "415 需要 application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		base.ServeHTTP(w, r)
+	})
 	if key := os.Getenv("ACCESS_KEY"); key != "" && key != "off" {
 		next := h
 		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 健康检查只回版本号，免鉴权：否则新版接管不了旧实例
+			switch r.URL.Path {
+			case "/api/health", "/icon.svg", "/icon-32.png", "/icon-180.png", "/favicon.ico":
+				next.ServeHTTP(w, r)
+				return
+			}
 			given := r.URL.Query().Get("k")
 			if given == "" {
 				given = r.Header.Get("x-key")
 			}
 			if given != key {
 				w.WriteHeader(401)
-				_, _ = w.Write([]byte("401"))
+				_, _ = w.Write([]byte("401 需要访问密钥，请在地址后加 ?k=你的密钥"))
 				return
 			}
 			next.ServeHTTP(w, r)

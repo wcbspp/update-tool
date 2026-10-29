@@ -4229,37 +4229,6 @@ func findUnsafeStatement(stmts []string) (int, string, bool) {
 	return 0, "", false
 }
 
-// isLoopbackReq 判断请求是否来自本机
-func isLoopbackReq(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	if ip.IsLoopback() {
-		return true
-	}
-	// 从本机用局域网地址打开（http://127.0.0.1:8787）也算本机
-	for _, own := range lanIPs() {
-		if own == host {
-			return true
-		}
-	}
-	return false
-}
-
-// sensitiveOpenToAll 未设 ACCESS_KEY 时，这些端点不应让局域网随便调
-func sensitiveEndpoint(p string) bool {
-	switch p {
-	case "/api/tree", "/api/logs", "/api/ds/test", "/api/run", "/api/preflight", "/api/order", "/api/group", "/api/script", "/api/ds", "/api/settings", "/api/shutdown":
-		return true
-	}
-	return false
-}
-
 func handler(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 
@@ -4722,13 +4691,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		for _, d := range s.DataSources {
 			if d.ID == b.ID {
 				saved = d
-			}
-		}
-		// 允许在表单里临时改 host/port，但没设访问密钥时不能拿它探任意地址
-		if (os.Getenv("ACCESS_KEY") == "" || os.Getenv("ACCESS_KEY") == "off") && b.Host != nil {
-			if *b.Host != saved.Host || (b.Port != nil && int(*b.Port) != saved.Port) {
-				writeJSON(w, 403, map[string]any{"ok": false, "error": "未设置访问密钥时只能测试已保存的数据源"})
-				return
 			}
 		}
 		ds := DataSource{Host: saved.Host, Port: saved.Port, User: saved.User, Database: saved.Database, Pass: saved.Pass}
@@ -5553,19 +5515,6 @@ func main() {
 		}
 		base.ServeHTTP(w, r)
 	})
-	if key := os.Getenv("ACCESS_KEY"); key == "" || key == "off" {
-		// 没设访问密钥时，局域网来的请求一律碰不到能改数据或读资产/日志的接口。
-		// 否则同一网段任何人都能读数据源清单、拿日志里的业务数据、拿这个工具当端口扫描器。
-		inner := h
-		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if sensitiveEndpoint(r.URL.Path) && !isLoopbackReq(r) {
-				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte("403 未设置访问密钥（ACCESS_KEY），该操作只允许在本机执行"))
-				return
-			}
-			inner.ServeHTTP(w, r)
-		})
-	}
 	if key := os.Getenv("ACCESS_KEY"); key != "" && key != "off" {
 		next := h
 		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

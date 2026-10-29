@@ -134,3 +134,30 @@ func TestParseValuesTuplesOnDuplicateInString(t *testing.T) {
 		t.Fatalf("应解析出 1 组 2 值，实际 %#v", tuples)
 	}
 }
+
+// 版本解析：真实生产串要能认出 5.7.41
+func TestParseServerVer(t *testing.T) {
+	cases := []struct {
+		raw                   string
+		major, minor, patch   int
+		atLeast80, atLeast578 bool
+	}{
+		{"5.7.41-230700-log", 5, 7, 41, false, true},
+		{"8.0.36", 8, 0, 36, true, true},
+		{"5.6.51-log", 5, 6, 51, false, false},
+		{"5.7.7", 5, 7, 7, false, false},
+	}
+	for _, c := range cases {
+		v := parseServerVer(c.raw)
+		if !v.ok || v.major != c.major || v.minor != c.minor || v.patch != c.patch {
+			t.Fatalf("%q 解析错：%+v", c.raw, v)
+		}
+		if v.atLeast(8, 0, 0) != c.atLeast80 || v.atLeast(5, 7, 8) != c.atLeast578 {
+			t.Fatalf("%q 版本比较错", c.raw)
+		}
+	}
+	// 认不出的版本不拦
+	if !parseServerVer("unknown").atLeast(8, 0, 0) {
+		t.Fatal("无法识别的版本不应拦截")
+	}
+}

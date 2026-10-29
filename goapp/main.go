@@ -2864,6 +2864,76 @@ func preflightInsertValues(db *sql.DB, schema string, i int, target, colList, re
 	}
 }
 
+// 服务端版本：不同版本能用的语法不一样，预检按版本给结论，而不是等执行报错
+type serverVer struct {
+	raw                 string
+	major, minor, patch int
+	ok                  bool
+}
+
+func parseServerVer(raw string) serverVer {
+	v := serverVer{raw: raw}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '.' || r == '-' || r == '+' || r == ' '
+	})
+	nums := make([]int, 0, 3)
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			break
+		}
+		nums = append(nums, n)
+		if len(nums) == 3 {
+			break
+		}
+	}
+	if len(nums) < 2 {
+		return v
+	}
+	v.major, v.minor = nums[0], nums[1]
+	if len(nums) > 2 {
+		v.patch = nums[2]
+	}
+	v.ok = true
+	return v
+}
+
+func (v serverVer) atLeast(major, minor, patch int) bool {
+	if !v.ok {
+		return true // 认不出就别拦，交给服务端判断
+	}
+	if v.major != major {
+		return v.major > major
+	}
+	if v.minor != minor {
+		return v.minor > minor
+	}
+	return v.patch >= patch
+}
+
+func serverVersion(db *sql.DB) serverVer {
+	var raw string
+	if err := db.QueryRow("SELECT VERSION()").Scan(&raw); err != nil || raw == "" {
+		return serverVer{}
+	}
+	return parseServerVer(raw)
+}
+
+// 只有 MySQL 8.0 才有的写法
+func usesMySQL8Only(st string) (string, bool) {
+	low := strings.ToLower(strings.TrimSpace(st))
+	if strings.HasPrefix(low, "with ") || strings.HasPrefix(low, "with(") {
+		return "WITH（CTE）", true
+	}
+	if strings.HasPrefix(low, "table ") {
+		return "TABLE 语句", true
+	}
+	if strings.HasPrefix(low, "values row") || strings.HasPrefix(low, "values(") {
+		return "VALUES ROW", true
+	}
+	return "", false
+}
+
 func preflight(ds DataSource, stmts []string, verColName string, verPfxs []string) ([]map[string]any, []map[string]any, error) {
 	db, err := openDB(ds)
 	if err != nil {
@@ -2880,6 +2950,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	if schema == "" {
 		_ = db.QueryRow("SELECT DATABASE()").Scan(&schema)
 	}
+	sv := serverVersion(db)
 	out := make([]map[string]any, 0)
 	// 记录每条语句是否真的产出过检查：UPDATE/DELETE 的检查是在循环之后
 	// 统一补的，不能用「循环内有没有 append」来判断是否覆盖
@@ -2928,6 +2999,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	for i, stRaw := range stmts {
 		st := stripCTE(stRaw)
 		ctes := cteNames(stRaw)
+		// 服务端版本不支持这个语法时，别等执行才报错
+		if feat, is8 := usesMySQL8Only(stRaw); is8 && !sv.atLeast(8, 0, 0) {
+			add(i, "error", "服务端不支持这个语法",
+				fmt.Sprintf("这条用了 %s，需要 MySQL 8.0 及以上；当前服务端是 %s，执行会直接报语法错误", feat, sv.raw))
+		}
 		for _, m := range reBatch.FindAllStringSubmatch(st, -1) {
 			full := strings.ToLower(m[0])
 			if !seenTable[full] {

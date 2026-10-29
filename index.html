@@ -865,6 +865,60 @@ function valueLink(toks, st, caret) {
   return null;
 }
 
+// 反向：给了插入列序号，找出下面 VALUES / SELECT 里对应的第 n 项
+function columnTargets(toks, st, idx) {
+  const hits = [];
+  let k = st.after, mode = '';
+  for (; k < toks.length; k++) {
+    const tk = toks[k];
+    if (tk.t === 'w') {
+      const up = tk.s.toUpperCase();
+      if (up === 'VALUES') { mode = 'v'; k++; break; }
+      if (up === 'SELECT') { mode = 's'; k++; break; }
+      if (up === 'INSERT') return hits;
+    }
+    if (tk.t === 'p' && tk.s === ';') return hits;
+  }
+  if (mode === 'v') {
+    for (; k < toks.length; k++) {
+      const tk = toks[k];
+      if (tk.t === 'p' && tk.s === ';') break;
+      if (tk.t === 'w' && tk.s.toUpperCase() === 'INSERT') break;
+      if (!(tk.t === 'p' && tk.s === '(')) continue;
+      const close = matchParen(toks, k);
+      if (close < 0) break;
+      let d = 0, n = 0;
+      for (let x = k; x <= close; x++) {
+        const t2 = toks[x];
+        if (t2.t === 'p' && t2.s === '(') { d++; continue; }
+        if (t2.t === 'p' && t2.s === ')') { d--; continue; }
+        if (d !== 1) continue;
+        if (t2.t === 'p' && t2.s === ',') { n++; continue; }
+        if (n === idx) { hits.push(x); break; }
+      }
+      k = close;
+    }
+    return hits;
+  }
+  if (mode === 's') {
+    let d = 0, n = 0, first = -1;
+    for (; k < toks.length; k++) {
+      const tk = toks[k];
+      if (tk.t === 'p' && tk.s === '(') d++;
+      else if (tk.t === 'p' && tk.s === ')') d--;
+      else if (d === 0 && ((tk.t === 'p' && tk.s === ',') || (tk.t === 'w' && /^(FROM|INSERT|UNION)$/.test(tk.s.toUpperCase())) || (tk.t === 'p' && tk.s === ';'))) {
+        if (n === idx && first >= 0) hits.push(first);
+        if (!(tk.t === 'p' && tk.s === ',')) break;
+        n++; first = -1;
+      }
+      if (d === 0 && first < 0 && tk.t !== 'p') first = k;
+    }
+    if (n === idx && first >= 0) hits.push(first);
+    return hits;
+  }
+  return hits;
+}
+
 function analyzeSQL(toks, caret) {
   const cls = toks.map(tk => ({ c: 'c', s: 's', n: 'n', p: 'p' }[tk.t] || ''));
   const hit = new Set();
@@ -890,6 +944,12 @@ function analyzeSQL(toks, caret) {
       if (caret < toks[st.insert].i) continue;
       const link = valueLink(toks, st, caret);
       if (link) { hit.add(link.col); break; }
+      const ci = st.cols.findIndex(c => toks[c].i <= caret && caret <= toks[c].j);
+      if (ci >= 0) {
+        hit.add(st.cols[ci]);
+        for (const t of columnTargets(toks, st, ci)) hit.add(t);
+        break;
+      }
     }
   }
   return { cls, hit };

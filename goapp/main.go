@@ -64,9 +64,6 @@ type DataSource struct {
 	User     string `json:"user"`
 	Pass     string `json:"password"`
 	Database string `json:"database"`
-	Open     bool   `json:"open"`
-	VerCol   string `json:"versionCol"`
-	VerPfxs  string `json:"versionPrefixes"`
 	Env      string `json:"env"` // prod | test
 	// 超时配置（0 表示用默认值）
 	ConnSec int `json:"connSec"` // 连接超时，秒，默认 10
@@ -450,7 +447,15 @@ func saveStore(s Store) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, dataFile)
+	if err := os.Rename(tmp, dataFile); err != nil {
+		return err
+	}
+	// rename 之后同步目录项，否则断电可能回退到上一次保存
+	if d, err := os.Open(filepath.Dir(dataFile)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 func newID() string {
@@ -834,8 +839,6 @@ func openDB(ds DataSource) (*sql.DB, error) {
 
 const appVersion = "1.0.19"
 
-var runMu sync.Mutex
-
 type cell = any
 
 func scanRows(rows *sql.Rows) ([]string, [][]cell, bool, error) {
@@ -987,7 +990,9 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": note})
 			continue
 		}
-		rows, err := db.Query("EXPLAIN " + st)
+		ctxX, cancelX := explainCtx()
+		defer cancelX()
+		rows, err := db.QueryContext(ctxX, "EXPLAIN "+st)
 		if err != nil {
 			allOK = false
 			results = append(results, map[string]any{"i": i, "ok": false, "error": withHint(err.Error())})
@@ -1004,7 +1009,6 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 var (
 	reInsert = regexp.MustCompile(`(?is)^\s*(?:insert|replace)\s+(?:low_priority\s+|delayed\s+|high_priority\s+)?(?:ignore\s+)?(?:into\s+)?[\x60"]?([\w$.]+)[\x60"]?\s*(?:partition\s*\([^)]*\)\s*)?(?:\(([^)]*)\)\s*)?((?:select|values?|set)\b.*)$`)
 	reFrom   = regexp.MustCompile(`(?is)\bfrom\s+[\x60"]?([\w$.]+)[\x60"]?`)
-	reUpdate = regexp.MustCompile(`(?is)^\s*update\s+(?:low_priority\s+)?(?:ignore\s+)?(.+?)\s+set\s+(.+)$`)
 	reDelete = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)`)
 	// DELETE t1, t2 FROM ... 与 DELETE FROM t USING ...
 	reDeleteMulti = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*(.+?)\s+from\s+`)
@@ -1138,11 +1142,19 @@ func parseTableRef(p string) (string, string) {
 	return table, alias
 }
 
+// EXPLAIN 也要有界：服务端不支持 max_execution_time 时（5.6/MariaDB），
+// 没有 context 就可能一直挂着并占住全局忙碌锁
+func explainCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 20*time.Second)
+}
+
 type tblRef struct{ table, alias string }
 
 // 用执行计划估算影响行数：不执行查询，只看 EXPLAIN 的 rows
 func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
-	rows, err := db.Query("EXPLAIN " + st)
+	ctxX, cancelX := explainCtx()
+	defer cancelX()
+	rows, err := db.QueryContext(ctxX, "EXPLAIN "+st)
 	if err != nil {
 		return 0, false
 	}
@@ -2076,7 +2088,9 @@ func whereRaw(st string) string {
 // 只读预估：把 UPDATE 的 FROM/WHERE 拿来 COUNT，不写任何数据
 // explainIndexes: 只做 EXPLAIN（不执行），返回本次统计实际用到的索引，形如 "hilist_b(PRIMARY)"
 func explainIndexes(db *sql.DB, q string) string {
-	rows, err := db.Query("EXPLAIN " + q)
+	ctxX, cancelX := explainCtx()
+	defer cancelX()
+	rows, err := db.QueryContext(ctxX, "EXPLAIN "+q)
 	if err != nil {
 		return ""
 	}
@@ -3761,10 +3775,11 @@ func readJSON(r *http.Request, v any) error {
 
 var logMu sync.Mutex
 
-func appendLog(entry map[string]any) {
+func appendLog(entry map[string]any) error {
 	b, err := json.Marshal(entry)
 	if err != nil {
-		return
+		log.Printf("执行日志序列化失败：%v", err)
+		return err
 	}
 	logMu.Lock()
 	defer logMu.Unlock()
@@ -3776,15 +3791,35 @@ func appendLog(entry map[string]any) {
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		return
+		log.Printf("执行日志写入失败（磁盘满/权限？）：%v", err)
+		return err
 	}
 	defer f.Close()
-	_, _ = f.Write(append(b, '\n'))
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		log.Printf("执行日志写入失败：%v", err)
+		return err
+	}
+	return nil
 }
 
 // 只读日志文件尾部，避免日志变大后每次全量解析
 func readLogTail(maxBytes int64) ([]byte, error) {
-	f, err := os.Open(filepath.Join(logsDir, "run-log.jsonl"))
+	main := filepath.Join(logsDir, "run-log.jsonl")
+	b, err := tailFile(main, maxBytes)
+	if len(b) < int(maxBytes/2) {
+		// 刚轮转过：主文件很小时，把上一份的尾部补在前面
+		if rb, e2 := tailFile(main+".1", maxBytes-int64(len(b))); e2 == nil {
+			b = append(rb, b...)
+		}
+	}
+	if b == nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func tailFile(path string, maxBytes int64) ([]byte, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -4020,13 +4055,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 下载三平台安装包（白名单，不接受任意路径）
 	if r.Method == http.MethodGet && strings.HasPrefix(p, "/dl/") {
 		files := map[string]string{
-			"medupdate.exe":           "release-win/medupdate.exe",
-			"medupdate-mac":           "release-mac/medupdate",
-			"medupdate-linux":         "release-linux/medupdate",
-			"medupdate-win-1.0.1.zip": "dist/medupdate-win-1.0.1.zip",
-			"medupdate-mac-1.0.1.zip": "dist/medupdate-mac-1.0.1.zip",
-			"medupdate-app.zip":       "dist/update-tool-mac-app.zip",
-			"medupdate-lan.zip":       "dist/medupdate-lan-1.0.4.zip",
+			"medupdate.exe":   "release-win/medupdate.exe",
+			"medupdate-mac":   "release-mac/medupdate",
+			"medupdate-linux": "release-linux/medupdate",
+		}
+		// dist 下的包按实际文件名提供，避免白名单写死旧版本号
+		if names, err := filepath.Glob(filepath.Join(appHome, "dist", "*.zip")); err == nil {
+			for _, full := range names {
+				files[filepath.Base(full)] = filepath.Join("dist", filepath.Base(full))
+			}
 		}
 		name := strings.TrimPrefix(p, "/dl/")
 		rel, ok := files[name]
@@ -4300,7 +4337,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			Database      *string  `json:"database"`
 			Password      *string  `json:"password"`
 			ClearPassword bool     `json:"clearPassword"`
-			VersionCol    *string  `json:"versionCol"`
 			VersionPfxs   *string  `json:"versionPrefixes"`
 			Env           *string  `json:"env"`
 			ConnSec       *flexInt `json:"connSec"`
@@ -4348,12 +4384,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if b.ClearPassword {
 			ds.Pass = ""
 		}
-		if b.VersionCol != nil {
-			ds.VerCol = strings.TrimSpace(*b.VersionCol)
-		}
-		if b.VersionPfxs != nil {
-			ds.VerPfxs = strings.TrimSpace(*b.VersionPfxs)
-		}
 		if b.Env != nil {
 			ds.Env = strings.TrimSpace(*b.Env)
 		}
@@ -4400,19 +4430,36 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		s := loadStore()
 		gids := map[string]bool{}
-		var keepG []Group
 		for _, g := range s.Groups {
 			if g.DSID == id {
 				gids[g.ID] = true
-			} else {
+			}
+		}
+		// 子文件夹继承父级的数据源，要沿着 parentId 一起删，否则留下孤儿
+		for changed := true; changed; {
+			changed = false
+			for _, g := range s.Groups {
+				if !gids[g.ID] && g.ParentID != "" && gids[g.ParentID] {
+					gids[g.ID] = true
+					changed = true
+				}
+			}
+		}
+		var keepG []Group
+		for _, g := range s.Groups {
+			if !gids[g.ID] {
 				keepG = append(keepG, g)
 			}
 		}
 		var keepS []Script
 		for _, sc := range s.Scripts {
-			if !gids[sc.GroupID] {
-				keepS = append(keepS, sc)
+			if gids[sc.GroupID] {
+				continue // 所属文件夹一起删
 			}
+			if sc.GroupID == "" && sc.DSID == id {
+				continue // 根级单层脚本直接挂在这个数据源上
+			}
+			keepS = append(keepS, sc)
 		}
 		var keepD []DataSource
 		for _, d := range s.DataSources {
@@ -5007,14 +5054,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if !runMu.TryLock() {
-			writeJSON(w, 409, map[string]any{"ok": false, "error": "已有脚本正在执行，请等它结束再试"})
-			return
-		}
-		results, failedAt, errMsg, ms := func() (map[string]stmtResult, int, string, int64) {
-			defer runMu.Unlock()
-			return runStatements(ds, stmts, dry)
-		}()
+		// 互斥已由上面的 tryBeginBusy 保证，这里不需要第二把锁
+		results, failedAt, errMsg, ms := runStatements(ds, stmts, dry)
 		previews := make([]string, len(stmts))
 		for i, st := range stmts {
 			previews[i] = preview(st)
@@ -5087,6 +5128,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": "清空日志需要显式确认（?confirm=1）"})
 			return
 		}
+		_ = os.Remove(filepath.Join(logsDir, "run-log.jsonl.1"))
 		if err := os.Remove(filepath.Join(logsDir, "run-log.jsonl")); err != nil && !os.IsNotExist(err) {
 			writeJSON(w, 500, map[string]any{"ok": false, "error": "删除日志失败：" + err.Error()})
 			return

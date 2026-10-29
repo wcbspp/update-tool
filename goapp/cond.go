@@ -143,7 +143,8 @@ func parseAtom(a string) (col string, c cstr, ok bool) {
 			return "", cstr{}, false
 		}
 		col = normCol(parts[0])
-		rest := parts[3]
+		// SplitN 把 "1 AND 10" 切成了 ["1", "AND 10"]，要拼回来再切 AND
+		rest := strings.TrimSpace(parts[2] + " " + parts[3])
 		bi := strings.Index(strings.ToUpper(rest), " AND ")
 		if bi < 0 {
 			return "", cstr{}, false

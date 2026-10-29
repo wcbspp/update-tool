@@ -34,7 +34,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-//go:embed index.html guide.html
+//go:embed index.html guide.html icon.svg icon-32.png icon-180.png
 var assets embed.FS
 
 const maxRows = 500
@@ -3176,6 +3176,29 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("content-disposition", "attachment; filename=\""+name+"\"")
 		http.ServeFile(w, r, full)
+		return
+	}
+
+	// 浏览器标签图标：SVG 优先，另给 PNG 兜底（老 Safari、部分 Windows 浏览器不认 SVG favicon）
+	if r.Method == http.MethodGet && (p == "/icon.svg" || p == "/icon-32.png" || p == "/icon-180.png" || p == "/favicon.ico") {
+		name := strings.TrimPrefix(p, "/")
+		ctype := "image/png"
+		switch name {
+		case "icon.svg":
+			ctype = "image/svg+xml"
+		case "favicon.ico", "icon-32.png":
+			name = "icon-32.png"
+		case "icon-180.png":
+			name = "icon-180.png"
+		}
+		b, err := assets.ReadFile(name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("content-type", ctype)
+		w.Header().Set("cache-control", "public, max-age=3600")
+		_, _ = w.Write(b)
 		return
 	}
 

@@ -42,16 +42,6 @@
   .node .ico{width:13px;flex:none;text-align:center;font-size:11px;opacity:.7}
   .node .lbl{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}
   .node .sub{font-size:10px;color:#65707f;font-family:ui-monospace,Menlo,monospace;max-width:94px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  /* 操作按钮绝对定位：悬停时不挤动文字，避免鼠标刚移过去目标就跑 */
-  .node .acts{position:absolute;right:4px;top:50%;transform:translateY(-50%);
-    display:flex;gap:2px;opacity:0;pointer-events:none;transition:opacity .12s;
-    padding-left:18px;border-radius:6px;
-    background:linear-gradient(90deg,rgba(26,32,41,0),rgba(26,32,41,.96) 34%)}
-  .node:hover .acts,.node.sel .acts{opacity:1;pointer-events:auto}
-  .node .acts button{width:20px;height:20px;display:flex;align-items:center;justify-content:center;
-    background:none;border:1px solid transparent;border-radius:4px;color:#65707f;
-    cursor:pointer;font-size:12px;line-height:1}
-  .node .acts button:hover{color:var(--fg);background:#1c2330;border-color:var(--line2)}
   .node .acts button:hover{color:var(--fg)}
   .empty{padding:14px 12px;color:#65707f;font-size:12px;line-height:1.8}
   .sect{display:flex;align-items:center;gap:5px;padding:9px 6px 5px;font-size:10px;letter-spacing:.11em;color:#5f6a7d;text-transform:uppercase;cursor:pointer;user-select:none}
@@ -381,7 +371,7 @@
     padding-left:16px;opacity:0;pointer-events:none;transition:opacity .12s;
     background:linear-gradient(90deg, rgba(26,33,44,0) 0%, #1a212c 38%);
     border-radius:0 5px 5px 0}
-  .node:hover .acts{opacity:1;pointer-events:auto}
+  .node:hover .acts,.node.sel .acts{opacity:1;pointer-events:auto}
   .node.sel .acts{background:linear-gradient(90deg, rgba(27,44,70,0) 0%, #1b2c46 38%)}
   /* 悬停时把行数/库名往左让一点，避免被按钮压住 */
   .node:hover .sub{opacity:0}

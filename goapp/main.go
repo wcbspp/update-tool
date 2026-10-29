@@ -2061,6 +2061,27 @@ func explainIndexes(db *sql.DB, q string) string {
 }
 
 // DELETE t1, t2 FROM t1 JOIN t2 ... ：把别名映射回真实表名
+
+var reJoinKw = regexp.MustCompile(`(?is)\s+(?:straight_join|inner\s+join|left\s+(?:outer\s+)?join|right\s+(?:outer\s+)?join|cross\s+join|join)\s+`)
+
+// UPDATE 的多表部分既可能是 "t1 a, t2 b"，也可能是 "t1 a JOIN t2 b ON ..."，
+// 统一切成单个表引用，并把 ON 条件丢掉
+func updateTableParts(s string) []string {
+	var out []string
+	for _, part := range splitTopLevel(s) {
+		for _, sub := range reJoinKw.Split(part, -1) {
+			if k := indexTopLevelPhrase(sub, " on "); k >= 0 {
+				sub = sub[:k]
+			}
+			sub = strings.TrimSpace(sub)
+			if sub != "" {
+				out = append(out, sub)
+			}
+		}
+	}
+	return out
+}
+
 func aliasToTable(st string) map[string]string {
 	low := strings.ToLower(st)
 	k := -1
@@ -2946,7 +2967,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 
 			var refs []tblRef
-			for _, part := range splitTopLevel(tablesPart) {
+			for _, part := range updateTableParts(tablesPart) {
 				if t, a := parseTableRef(part); t != "" {
 					refs = append(refs, tblRef{mResolveTable(db, schema, t), a})
 				}

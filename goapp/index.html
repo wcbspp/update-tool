@@ -368,7 +368,7 @@
   .node .acts{
     position:absolute;right:3px;top:50%;transform:translateY(-50%);
     display:none;align-items:center}
-  .node.sel .acts{display:flex}
+  .node:hover .acts,.node.sel .acts{display:flex}
   .node .acts button.more{
     width:18px;height:18px;padding:0;display:flex;align-items:center;justify-content:center;
     background:none;border:0;border-radius:4px;color:#7f8b9e;cursor:pointer;
@@ -1045,18 +1045,18 @@ function renderTree() {
       const envTxt = d.env === 'test' ? '测试' : '生产';
       const st = DS_HEALTH[d.id] === 'ok' ? '正常' : DS_HEALTH[d.id] === 'fail' ? '失败' : '未检测';
       const tip = `${d.name}（${envTxt}）\n${d.user}@${d.host}:${d.port}/${d.database || ''}\n状态：${st}`;
-      h += `<div class="node" data-key="d${d.id}" title="${esc(tip)}" style="padding-left:16px">
+      h += `<div class="node" data-key="d${d.id}" title="${esc(tip)}" style="padding-left:16px;padding-right:26px">
         <span class="ico">${iconFor('d')}</span>
         <span class="dot ${DS_HEALTH[d.id] === 'ok' ? 'ok' : DS_HEALTH[d.id] === 'fail' ? 'fail' : ''}"></span>
         <span class="lbl">${esc(d.name)}</span>
         <span class="badge ${d.env === 'test' ? 'test' : 'prod'}">${d.env === 'test' ? '测试' : '生产'}</span>
-        <span class="acts">
-          <button data-act="actCheckDs" data-arg="d${d.id}" title="检测连接 / 重连" data-tip="检测连接 / 重连">⟳</button>
-          <button data-act="actAddGroup" data-arg="d${d.id}" title="新建顶层文件夹" data-tip="新建顶层文件夹">＋</button>
-          <button data-act="actAddRootScript" data-arg="d${d.id}" title="新建单层脚本" data-tip="新建单层脚本（直接挂这个连接）">✚</button>
-          <button data-act="editDs" data-arg="d${d.id}" title="编辑连接" data-tip="编辑连接">✎</button>
-          <button data-act="delDs" data-arg="d${d.id}" title="删除连接" data-tip="删除连接">✕</button>
-        </span>
+        <span class="acts"><button class="more" data-act="rowMenu" data-arg="d${d.id}" data-menu="${encodeURIComponent(JSON.stringify([
+          ['⟳', 'actCheckDs', 'd' + d.id, '检测连接 / 重连'],
+          ['＋', 'actAddGroup', 'd' + d.id, '新建顶层文件夹'],
+          ['✚', 'actAddRootScript', 'd' + d.id, '新建单层脚本'],
+          ['✎', 'editDs', 'd' + d.id, '编辑连接'],
+          ['✕', 'delDs', 'd' + d.id, '删除连接']
+        ]))}" title="更多">⋯</button></span>
       </div>`;
     }
     h += `<div style="height:4px"></div>`;
@@ -1157,16 +1157,17 @@ function rowMenuOutside(e) {
 }
 function rowMenu(key) {
   closeRowMenu();
-  const btn = document.querySelector(`.node[data-key="${key}"] .acts button`);
-  if (!btn) return;
+  const nodeEl = document.querySelector(`.node[data-key="${key}"]`);
+  if (!nodeEl) return;
+  const btn = nodeEl.querySelector('.acts button');
   let items = [];
-  try { items = JSON.parse(decodeURIComponent(btn.dataset.menu || '')); } catch (e) { return; }
+  try { items = JSON.parse(decodeURIComponent((btn && btn.dataset.menu) || '')); } catch (e) { return; }
   if (!items.length) return;
   const m = document.createElement('div');
   m.id = 'rowmenu';
   m.innerHTML = items.map(a => `<button data-fn="${a[1]}" data-arg="${a[2]}">${esc(a[3])}</button>`).join('');
   document.body.appendChild(m);
-  const r = btn.getBoundingClientRect();
+  const r = nodeEl.getBoundingClientRect();
   const w = m.offsetWidth, h = m.offsetHeight;
   m.style.left = Math.max(4, Math.min(r.right - w, window.innerWidth - w - 6)) + 'px';
   m.style.top = (r.bottom + h + 6 > window.innerHeight ? r.top - h - 4 : r.bottom + 4) + 'px';

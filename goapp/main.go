@@ -467,7 +467,7 @@ func newID() string {
 func stmtKind(st string) string {
 	up := strings.ToUpper(strings.TrimSpace(st))
 	switch {
-	case strings.HasPrefix(up, "INSERT"):
+	case strings.HasPrefix(up, "INSERT"), strings.HasPrefix(up, "REPLACE"):
 		return "insert"
 	case strings.HasPrefix(up, "UPDATE"):
 		return "update"
@@ -932,7 +932,7 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 /* ---------------- 体检（DML 预检） ---------------- */
 
 var (
-	reInsert = regexp.MustCompile(`(?is)^\s*insert\s+(?:ignore\s+)?into\s+[\x60"]?([\w$.]+)[\x60"]?\s*(?:\(([^)]*)\))?\s*((?:select|values)\b.*)$`)
+	reInsert = regexp.MustCompile(`(?is)^\s*(?:insert|replace)\s+(?:ignore\s+)?into\s+[\x60"]?([\w$.]+)[\x60"]?\s*(?:\(([^)]*)\))?\s*((?:select|values)\b.*)$`)
 	reFrom   = regexp.MustCompile(`(?is)\bfrom\s+[\x60"]?([\w$.]+)[\x60"]?`)
 	reUpdate = regexp.MustCompile(`(?is)^\s*update\s+(.+?)\s+set\s+(.+)$`)
 	reDelete = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)`)
@@ -2607,7 +2607,10 @@ func parseValuesTuples(rest string) [][]string {
 // INSERT IGNORE / ON DUPLICATE KEY UPDATE 的语义是「冲突不报错」，预检结论要跟着软化
 func insertTolerant(st string) (bool, string) {
 	low := strings.ToLower(strings.TrimSpace(st))
-	if strings.HasPrefix(low, "insert ignore") || strings.HasPrefix(low, "replace into") {
+	if strings.HasPrefix(low, "replace ") {
+		return true, "REPLACE"
+	}
+	if strings.HasPrefix(low, "insert ignore") {
 		return true, "IGNORE"
 	}
 	if strings.Contains(low, "on duplicate key update") {

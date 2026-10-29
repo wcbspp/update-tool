@@ -100,3 +100,37 @@ func TestEffectiveUpdateURL(t *testing.T) {
 		}
 	}
 }
+
+// REPLACE INTO 要当成 insert 类语句走预检
+func TestStmtKindReplace(t *testing.T) {
+	if got := stmtKind("REPLACE INTO t (a) VALUES (1)"); got != "insert" {
+		t.Fatalf("REPLACE 应识别为 insert，实际 %q", got)
+	}
+	if got := stmtKind("replace into t select * from s"); got != "insert" {
+		t.Fatalf("小写 replace 也应识别，实际 %q", got)
+	}
+}
+
+// 冲突不报错的三种写法都要被识别
+func TestInsertTolerant(t *testing.T) {
+	cases := []struct{ st, how string }{
+		{"REPLACE INTO t VALUES (1)", "REPLACE"},
+		{"INSERT IGNORE INTO t VALUES (1)", "IGNORE"},
+		{"INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE a=1", "ON DUPLICATE KEY UPDATE"},
+		{"INSERT INTO t VALUES (1)", ""},
+	}
+	for _, c := range cases {
+		ok, how := insertTolerant(c.st)
+		if ok != (c.how != "") || how != c.how {
+			t.Fatalf("%q → (%v,%q)，期望 (%v,%q)", c.st, ok, how, c.how != "", c.how)
+		}
+	}
+}
+
+// 字符串里出现 on duplicate 不能被当成语法
+func TestParseValuesTuplesOnDuplicateInString(t *testing.T) {
+	tuples := parseValuesTuples(`VALUES ('on duplicate key update is just text', 2)`)
+	if len(tuples) != 1 || len(tuples[0]) != 2 {
+		t.Fatalf("应解析出 1 组 2 值，实际 %#v", tuples)
+	}
+}

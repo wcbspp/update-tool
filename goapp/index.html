@@ -1026,8 +1026,9 @@ function editingGuarded(id, what) {
 }
 function groupScriptIds(g) {
   const out = [];
-  for (const sc of (g.scripts || [])) out.push(sc.id);
-  for (const f of (g.folders || [])) out.push(...groupScriptIds(f));
+  if (!g) return out;
+  for (const id of (g.scripts || [])) out.push(id);
+  for (const cid of (g.folders || [])) out.push(...groupScriptIds(IDX.g[cid]));
   return out;
 }
 function busyBlocked() {
@@ -1454,6 +1455,8 @@ function indexTree() {
       const isTop = !top;
       IDX.g[g.id] = {
         id: g.id, name: g.name, path: path.concat(g.name), isTop,
+        scripts: (g.scripts || []).map(x => x.id),
+        folders: (g.folders || []).map(x => x.id),
         topId: isTop ? g.id : top.id,
         dsId: isTop ? (g.dsId || '') : (top.dsId || ''),
         dsName: isTop ? (g.dsName || '') : (top.dsName || ''),
@@ -1575,6 +1578,7 @@ function queueTree() {
 }
 
 function renderTree() {
+  closeRowMenu();   // 树一重绘，旧菜单定位的节点就没了，先收掉
   const q = ($('q').value || '').toLowerCase().trim();
   const dsOpen = openState['ds'] !== false;
   let h = '';
@@ -1828,7 +1832,9 @@ async function delDs(key) {
   const ds = DS.find(x => x.id === id);
   if (!confirm(`删除数据源「${ds ? ds.name : ''}」？挂它的文件夹会变成「未挂库」。`)) return;
   await del('/api/ds?id=' + id);
-  await loadTree(); toast('已删除', 'ok');
+  await loadTree();
+  if (CUR && !IDX.s[CUR]) clearEditor();
+  toast('已删除', 'ok');
 }
 
 async function actAddGroup(key) {
@@ -1978,7 +1984,9 @@ async function delGroup(key) {
   }
   if (!confirm(`删除文件夹「${g.name}」及其下所有子文件夹和脚本？`)) return;
   await del('/api/group?id=' + g.id);
-  await loadTree(); toast('已删除', 'ok');
+  await loadTree();
+  if (CUR && !IDX.s[CUR]) clearEditor();
+  toast('已删除', 'ok');
 }
 
 async function editScript(key) {
@@ -2024,6 +2032,7 @@ function clearEditor() {
   sync();
 }
 async function selectScript(id) {
+  if (busyBlocked()) return;
   if (dirty && !confirm('当前 SQL 未保存，确定切换？')) return;
   const seq = ++ACT_SEQ;     // 快速切换时，晚到的旧响应直接丢弃
   let r;
@@ -2047,11 +2056,14 @@ async function selectScript(id) {
 async function saveSql() {
   if (!CUR || !EDIT_MODE) return;
   if (busyBlocked()) return;
+  const saveSeq = ACT_SEQ;
   BUSY = 'save'; sync();
   try {
     await post('/api/script', { id: CUR, sql: $('sql').value });
+    if (saveSeq !== ACT_SEQ) return;   // 期间切过脚本，别把新上下文的状态改掉
     dirty = false;
     await loadTree();
+    if (saveSeq !== ACT_SEQ) return;
     setEditMode(false);
     toast('已保存，已切回只读', 'ok');
   } catch (e) {
@@ -2178,9 +2190,9 @@ async function preflight(silent, ownerSeq) {
     if (seq === ACT_SEQ && !silent) { showErr(e.message); toast(e.message, 'bad'); }
     return null;
   } finally {
-    // 所有早退路径都要停转圈，不留残影
-    if (!silent) { BUSY = ''; sync(); }
-    if (seq === ACT_SEQ) hideBusy();
+    // 所有早退路径都要停转圈，不留残影；切了脚本也要停，否则定时器一直转
+    hideBusy();
+    if (!silent && seq === ACT_SEQ) { BUSY = ''; sync(); }
   }
 }
 

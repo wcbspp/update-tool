@@ -21,6 +21,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2062,11 +2063,25 @@ func explainIndexes(db *sql.DB, q string) string {
 // DELETE t1, t2 FROM t1 JOIN t2 ... ：把别名映射回真实表名
 func aliasToTable(st string) map[string]string {
 	low := strings.ToLower(st)
-	k := strings.Index(low, " from ")
+	k := -1
+	for off := 0; off < len(low); {
+		j := strings.Index(low[off:], "from")
+		if j < 0 {
+			break
+		}
+		j += off
+		prevOK := j > 0 && !isWordRune(rune(low[j-1]))
+		nextOK := j+4 >= len(low) || !isWordRune(rune(low[j+4]))
+		if prevOK && nextOK {
+			k = j
+			break
+		}
+		off = j + 4
+	}
 	if k < 0 {
 		return nil
 	}
-	rest := st[k+6:]
+	rest := st[k+4:]
 	for _, kw := range []string{"where", "group", "order", "limit", "having"} {
 		rest = cutAtKeyword(rest, kw)
 	}
@@ -2382,6 +2397,62 @@ func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 // 解析 INSERT ... VALUES 的常量元组（返回每个括号组里的顶层值文本）
 
 // 按顶层逗号切值，字符串和括号里的逗号不算
+
+// 只在括号外、引号外查找短语，避免把字符串里的内容当成语法
+func indexTopLevelPhrase(s, phrase string) int {
+	low := strings.ToLower(s)
+	depth := 0
+	inS, inD, inBt := false, false, false
+	for i := 0; i < len(low); i++ {
+		c := low[i]
+		if inS {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '\'' {
+				inS = false
+			}
+			continue
+		}
+		if inD {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inD = false
+			}
+			continue
+		}
+		if inBt {
+			if c == '`' {
+				inBt = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inS = true
+		case '"':
+			inD = true
+		case '`':
+			inBt = true
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 && strings.HasPrefix(low[i:], phrase) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 func splitValues(s string) []string {
 	var out []string
 	var buf strings.Builder
@@ -2409,6 +2480,11 @@ func splitValues(s string) []string {
 		}
 		if inD {
 			buf.WriteRune(c)
+			if c == '\\' && i+1 < len(rs) {
+				i++
+				buf.WriteRune(rs[i])
+				continue
+			}
 			if c == '"' {
 				inD = false
 			}
@@ -2455,11 +2531,10 @@ func splitValues(s string) []string {
 }
 
 func parseValuesTuples(rest string) [][]string {
-	low := strings.ToLower(rest)
-	if k := strings.Index(low, "on duplicate"); k >= 0 {
+	if k := indexTopLevelPhrase(rest, "on duplicate"); k >= 0 {
 		rest = rest[:k]
-		low = low[:k]
 	}
+	low := strings.ToLower(rest)
 	k := strings.Index(low, "values")
 	if k < 0 {
 		return nil
@@ -2529,7 +2604,19 @@ func parseValuesTuples(rest string) [][]string {
 }
 
 // INSERT ... VALUES 的预检：行数 + 主键冲突（列清单里要有完整主键才判）
-func preflightInsertValues(db *sql.DB, schema string, i int, target, colList, rest string, pfSec int, add func(int, string, string, string)) {
+// INSERT IGNORE / ON DUPLICATE KEY UPDATE 的语义是「冲突不报错」，预检结论要跟着软化
+func insertTolerant(st string) (bool, string) {
+	low := strings.ToLower(strings.TrimSpace(st))
+	if strings.HasPrefix(low, "insert ignore") || strings.HasPrefix(low, "replace into") {
+		return true, "IGNORE"
+	}
+	if strings.Contains(low, "on duplicate key update") {
+		return true, "ON DUPLICATE KEY UPDATE"
+	}
+	return false, ""
+}
+
+func preflightInsertValues(db *sql.DB, schema string, i int, target, colList, rest string, pfSec int, tolerant bool, tolerantHow string, add func(int, string, string, string)) {
 	tuples := parseValuesTuples(rest)
 	if len(tuples) == 0 {
 		add(i, "warn", "无法解析 VALUES", "没能拆出具体的值列表，只确认了目标表存在；请人工核对")
@@ -2588,7 +2675,12 @@ func preflightInsertValues(db *sql.DB, schema string, i int, target, colList, re
 		seen[k] = true
 	}
 	if dupInList > 0 {
-		add(i, "error", "值列表内部重复", fmt.Sprintf("有 %d 组值的主键完全相同，执行会直接报主键冲突", dupInList))
+		lvl, msg := "error", fmt.Sprintf("有 %d 组值的主键完全相同，执行会直接报主键冲突", dupInList)
+		if tolerant {
+			lvl = "warn"
+			msg = fmt.Sprintf("有 %d 组值的主键重复，会走 %s 覆盖，不会报错", dupInList, tolerantHow)
+		}
+		add(i, lvl, "值列表内部重复", msg)
 	}
 
 	limit := len(tuples)
@@ -2619,7 +2711,9 @@ func preflightInsertValues(db *sql.DB, schema string, i int, target, colList, re
 	if limit < len(tuples) {
 		note = fmt.Sprintf("（只比对了前 %d 组）", limit)
 	}
-	if exists > 0 {
+	if exists > 0 && tolerant {
+		add(i, "warn", "主键已存在", fmt.Sprintf("%s 里已有 %d 行同主键的数据，会走 %s 覆盖/跳过，不会报错%s", target, exists, tolerantHow, note))
+	} else if exists > 0 {
 		add(i, "error", "主键冲突", fmt.Sprintf("%s 里已经有 %d 行同主键的数据，执行会失败并整批回滚%s", target, exists, note))
 	} else {
 		add(i, "ok", "无主键冲突", fmt.Sprintf("与 %s 比对无重复%s", target, note))
@@ -2701,7 +2795,8 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			add(i, "ok", "目标表", target)
 			fm := reFrom.FindStringSubmatch(m[3])
 			if fm == nil {
-				preflightInsertValues(db, schema, i, target, colList, m[3], pfSec, add)
+				tolerant, tolerantHow := insertTolerant(st)
+				preflightInsertValues(db, schema, i, target, colList, m[3], pfSec, tolerant, tolerantHow, add)
 				continue
 			}
 			src := mResolveTable(db, schema, normTable(fm[1]))
@@ -2717,6 +2812,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 			}
 			pk, idxName := mKeyCols(db, schema, target)
+			tolerant, tolerantHow := insertTolerant(st)
 			// 判重列在源表里对应哪一列：SELECT 里换过顺序、写过表达式就说不准，不做结论
 			srcOf, mapOK := insertKeyMap(m[3], colList, pk)
 
@@ -2795,7 +2891,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				if dupTrunc {
 					msg = fmt.Sprintf("%s 内至少有 %d 组重复主键（数到 1000 就停了），插入会失败", src, dup)
 				}
-				addD(i, "error", "源表主键重复", msg, durDup)
+				lvl := "error"
+				if tolerant {
+					lvl, msg = "warn", fmt.Sprintf("%s 内有 %d 组重复主键，会走 %s 覆盖/跳过，不会报错", src, dup, tolerantHow)
+				}
+				addD(i, lvl, "源表主键重复", msg, durDup)
 			}
 			if confErr != nil {
 				add(i, "warn", "主键冲突检查未完成", "查询失败或超时（表可能很大）："+withHint(confErr.Error()))
@@ -2804,7 +2904,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				if confTrunc {
 					msg = fmt.Sprintf("%s 至少已存在 %d 行相同主键（数到 1000 就停了），INSERT 会失败（大概率这批已执行过）", target, conf)
 				}
-				addD(i, "error", "主键冲突", msg, durConf)
+				lvl := "error"
+				if tolerant {
+					lvl, msg = "warn", fmt.Sprintf("%s 已有 %d 行同主键，会走 %s 覆盖/跳过，不会报错", target, conf, tolerantHow)
+				}
+				addD(i, lvl, "主键冲突", msg, durConf)
 			} else {
 				addD(i, "ok", "无主键冲突", fmt.Sprintf("与 %s 比对无重复", target), durConf)
 			}
@@ -2844,7 +2948,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				if len(refs) == 1 {
 					r := refs[0]
 					if whereTail(st) == "" {
-						add(i, "error", "没有 WHERE 条件", "这条 UPDATE 会更新整张表，请确认不是笔误（确实要全表更新请写成 WHERE 1=1）")
+						if lim := deleteLimit(st); lim > 0 {
+							add(i, "warn", "没有 WHERE 条件", fmt.Sprintf("这条 UPDATE 没有 WHERE，按 LIMIT %d 最多改 %d 行，请确认不是笔误", lim, lim))
+						} else {
+							add(i, "error", "没有 WHERE 条件", "这条 UPDATE 会更新整张表，请确认不是笔误（确实要全表更新请写成 WHERE 1=1）")
+						}
 					}
 					for _, col := range unqual {
 						if !mHasColumn(db, schema, r.table, col) {
@@ -2889,7 +2997,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 
 			if whereTail(st) == "" {
-				add(i, "error", "没有 WHERE 条件", "这条 UPDATE 会更新整张表，请确认不是笔误（确实要全表更新请改成 WHERE 1=1 再跑）")
+				if lim := deleteLimit(st); lim > 0 {
+					add(i, "warn", "没有 WHERE 条件", fmt.Sprintf("这条 UPDATE 没有 WHERE，按 LIMIT %d 最多改 %d 行，请确认不是笔误", lim, lim))
+				} else {
+					add(i, "error", "没有 WHERE 条件", "这条 UPDATE 会更新整张表，请确认不是笔误（确实要全表更新请改成 WHERE 1=1 再跑）")
+				}
 			}
 			for _, col := range unqual {
 				hit := false
@@ -3213,7 +3325,10 @@ const (
 
 func effectiveUpdateURL(raw string) string {
 	u := strings.TrimSpace(raw)
-	if u == "" || strings.Contains(u, legacyUpdateURL) {
+	if u == "" {
+		return defaultUpdateURL
+	}
+	if p, err := url.Parse(u); err == nil && strings.EqualFold(p.Hostname(), legacyUpdateURL) {
 		return defaultUpdateURL
 	}
 	return u
@@ -3248,15 +3363,19 @@ var (
 )
 
 // 执行 / 预检 / 校验期间禁止改配置，避免删掉正在跑的脚本
-func beginBusy(kind string) func() {
+// 占锁要原子：先判断再置位，两个请求同时进来只能有一个成功
+func tryBeginBusy(kind string) (func(), bool) {
 	busyMu.Lock()
+	defer busyMu.Unlock()
+	if busyKind != "" {
+		return nil, false
+	}
 	busyKind = kind
-	busyMu.Unlock()
 	return func() {
 		busyMu.Lock()
 		busyKind = ""
 		busyMu.Unlock()
-	}
+	}, true
 }
 
 func busyNow() string {
@@ -3359,8 +3478,13 @@ func hostAllowed(host string, extra []string) bool {
 	case "localhost", "127.0.0.1", "::1", "[::1]":
 		return true
 	}
-	for _, ip := range extra {
-		if strings.EqualFold(ip, h) {
+	// 私网/回环 IP 字面量一律放行：覆盖 IPv6、换网换 IP 的情况；
+	// 攻击者的域名（evil.example.com）ParseIP 不成立，仍然被挡。
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate()
+	}
+	for _, name := range extra {
+		if strings.EqualFold(name, h) {
 			return true
 		}
 	}
@@ -4299,11 +4423,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}})
 
 	case r.Method == http.MethodPost && p == "/api/preflight":
-		if k := busyNow(); k != "" {
-			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + k + "，先等它结束"})
+		doneBusy, okBusy := tryBeginBusy("预检")
+		if !okBusy {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + busyNow() + "，先等它结束"})
 			return
 		}
-		doneBusy := beginBusy("预检")
 		defer doneBusy()
 		var b struct {
 			ScriptID string `json:"scriptId"`
@@ -4385,11 +4509,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": !hasErr, "checks": checks, "versions": versions, "count": len(stmts), "previews": previews, "ms": time.Since(pfStart).Milliseconds()})
 
 	case r.Method == http.MethodPost && p == "/api/check":
-		if k := busyNow(); k != "" {
-			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + k + "，先等它结束"})
+		doneBusy, okBusy := tryBeginBusy("语法校验")
+		if !okBusy {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + busyNow() + "，先等它结束"})
 			return
 		}
-		doneBusy := beginBusy("语法校验")
 		defer doneBusy()
 		var b struct {
 			ScriptID string `json:"scriptId"`
@@ -4435,11 +4559,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			"previews": previews, "ms": time.Since(chkStart).Milliseconds()})
 
 	case r.Method == http.MethodPost && p == "/api/run":
-		if k := busyNow(); k != "" {
-			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + k + "，先等它结束"})
+		doneBusy, okBusy := tryBeginBusy("执行")
+		if !okBusy {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "正在" + busyNow() + "，先等它结束"})
 			return
 		}
-		doneBusy := beginBusy("执行")
 		defer doneBusy()
 		var b struct {
 			ScriptID string           `json:"scriptId"`
@@ -4476,6 +4600,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if len(stmts) == 0 {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": "没有可执行的 SQL"})
 			return
+		}
+		// 预检是能关的开关，这条防线必须在执行入口自己兜住：
+		// 无条件 DELETE（无 WHERE、无 LIMIT、无 JOIN）直接拒绝。
+		for idx, st := range stmts {
+			if stmtKind(st) == "delete" && whereTail(st) == "" && deleteLimit(st) == 0 &&
+				!reDeleteUsing.MatchString(st) && !reDeleteMulti.MatchString(st) {
+				writeJSON(w, 400, map[string]any{"ok": false,
+					"error": fmt.Sprintf("第 %d 条是无条件 DELETE，会清空整张表，已拒绝执行；确实要清空请加 LIMIT 或改用 TRUNCATE", idx+1)})
+				return
+			}
 		}
 		dry := true
 		if b.DryRun != nil {
@@ -4746,6 +4880,9 @@ func main() {
 	var h http.Handler = http.HandlerFunc(handler)
 	// 只接受本机 / 局域网 Host，挡掉 DNS rebinding 把请求伪装成同源的玩法
 	extraHosts := lanIPs()
+	if hn, err := os.Hostname(); err == nil && hn != "" {
+		extraHosts = append(extraHosts, hn, hn+".local")
+	}
 	base := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host

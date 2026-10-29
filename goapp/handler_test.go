@@ -27,7 +27,10 @@ func TestSaveFailedReturns500(t *testing.T) {
 
 // 执行/预检期间改配置要被 409 挡住
 func TestBusyBlocksConfigWrites(t *testing.T) {
-	done := beginBusy("执行")
+	done, okBusy := tryBeginBusy("执行")
+	if !okBusy {
+		t.Fatal("空闲时应该能占锁")
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/api/script?id=x", nil)
 	handler(rec, req)

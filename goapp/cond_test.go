@@ -21,6 +21,7 @@ func TestCondsOverlap(t *testing.T) {
 		{"没有共同列", "a.CODE='X'", "b.OTHER='Y'", false, false},
 		{"含函数无法判定", "a.DATE(a.D)='2026-01-01'", "b.D='2026-01-01'", false, false},
 		{"列比列无法判定", "a.CODE = b.CODE", "a.CODE = 'X'", false, false},
+		{"同语句双别名同列", "a.CODE='X' AND b.CODE='Y'", "c.CODE='X'", false, false},
 	}
 	for _, c := range cases {
 		ov, known := condsOverlap(c.a, c.b)

@@ -136,7 +136,7 @@ func TestPreflightMultiStatementSameTable(t *testing.T) {
 }
 
 // 并发化之后结果必须不变：有冲突、无冲突、冲突数到上限就停
-func TestPreflightInsertConflictParallel(t *testing.T) {
+func TestPreflightInsertConflictDedup(t *testing.T) {
 	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
 	db, err := openDB(ds)
 	if err != nil {

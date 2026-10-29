@@ -2797,8 +2797,17 @@ async function openUpdate() {
     try { const st = await api('/api/settings'); if (st && st.updateUrl) UPDATE_BASE = st.updateUrl; } catch (e) {}
   }
   const r = UPDATE_INFO;
-  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
-  const f = r ? (isMac ? (r.mac || r.win) : (r.win || r.mac)) : null;
+  const _plat = navigator.platform || '';
+  const isMac = /Mac|iPhone|iPad/.test(_plat);
+  const isLinux = /Linux|X11/.test(_plat) && !/Android/.test(navigator.userAgent || '');
+  // 选对应平台；没有就用 win 兜底，但 Linux 上绝不下 Windows 包
+  let f = null;
+  if (r) {
+    if (isMac) f = r.mac || null;
+    else if (isLinux) f = r.linux || null;
+    else f = r.win || null;
+    if (!f) f = r.win || r.mac || r.linux || null;
+  }
   const dlg = $('dlg');
   dlg.className = 'dlg';
 

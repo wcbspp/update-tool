@@ -4405,6 +4405,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			if f, ok := files["mac"]; ok {
 				out["mac"] = f
 			}
+			if f, ok := files["linux"]; ok {
+				out["linux"] = f
+			}
 		}
 		writeJSON(w, 200, out)
 
@@ -5242,9 +5245,12 @@ func makeRelease(args []string) {
 	}
 	files := map[string]any{}
 	sums := make([]string, 0, 2)
-	for _, osname := range []string{"win", "mac"} {
+	for _, osname := range []string{"win", "mac", "linux"} {
 		// 支持随机后缀：medupdate-win-1.0.5-a8f3c2.zip
 		matches, _ := filepath.Glob(filepath.Join(*dir, fmt.Sprintf("medupdate-%s-*.zip", osname)))
+		if osname == "linux" && len(matches) == 0 {
+			continue // linux 包可选，没打就不进清单
+		}
 		if len(matches) != 1 {
 			fmt.Fprintf(os.Stderr, "%s 目录下应当正好有一个 medupdate-%s-*.zip，实际 %d 个\n", *dir, osname, len(matches))
 			os.Exit(2)
@@ -5454,8 +5460,17 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	if err := srv.ListenAndServe(); err != nil {
+		// Windows 双击启动没有控制台，失败信息必须落盘，否则用户只看到「没反应」
+		writeStartupLog(err)
 		log.Fatal(err)
 	}
+}
+
+// writeStartupLog 把启动失败写进 logs/startup.log，方便双击启动的用户排查
+func writeStartupLog(err error) {
+	_ = os.MkdirAll("logs", 0o755)
+	line := time.Now().Format("2006-01-02 15:04:05") + " 启动失败: " + err.Error() + "\n"
+	_ = os.WriteFile("logs/startup.log", []byte(line), 0o644)
 }
 
 func lanIPs() []string {

@@ -104,13 +104,21 @@ func perfRun(t *testing.T, ds DataSource, name, sql string) []map[string]any {
 		t.Fatalf("%s 预检失败: %v", name, err)
 	}
 	ms := 0
+	hasRowEstimate := false
 	for _, c := range checks {
 		if c["title"] == "预计影响行数" {
+			hasRowEstimate = true
 			if s, ok := c["detail"].(string); ok {
 				t.Logf("[%s] %s（%s）", name, s, d.Round(time.Millisecond))
 			}
 		}
 		ms++
+	}
+	if ms == 0 {
+		t.Fatalf("%s 预检没有返回任何检查项", name)
+	}
+	if !hasRowEstimate {
+		t.Errorf("%s 缺少「预计影响行数」检查项，预检可能没跑起来", name)
 	}
 	if ms == 0 {
 		t.Fatalf("%s 没有任何检查项", name)

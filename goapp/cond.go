@@ -64,13 +64,20 @@ func isLiteral(raw string) bool {
 	return strings.EqualFold(r, "null")
 }
 
+// normCol 保留表别名前缀（a.id 与 b.id 不是同一列），只去掉反引号与空白
 func normCol(s string) string {
 	s = strings.TrimSpace(s)
-	s = strings.Trim(s, "`\"")
-	if dot := strings.LastIndex(s, "."); dot >= 0 {
-		s = s[dot+1:]
+	s = strings.NewReplacer("`", "", "\"", "").Replace(s)
+	s = strings.Join(strings.Fields(s), "")
+	return strings.ToLower(s)
+}
+
+// splitAlias 把 a.id 拆成 (id, a)，没有别名时别名为空
+func splitAlias(key string) (base, alias string) {
+	if dot := strings.LastIndex(key, "."); dot >= 0 {
+		return key[dot+1:], key[:dot]
 	}
-	return strings.ToLower(strings.Trim(s, "`\""))
+	return key, ""
 }
 
 // 按顶层 AND 切分，忽略括号、引号，以及 BETWEEN ... AND 里的 AND
@@ -400,14 +407,29 @@ func condsOverlap(whereA, whereB string) (overlap, known bool) {
 	if a.unknown || b.unknown || a.atoms == 0 || b.atoms == 0 {
 		return false, false
 	}
+	// 同一条语句里保留别名（a.CODE 与 b.CODE 是两个约束），
+	// 跨语句比较时别名没意义，按去掉别名的列名配对
+	groupA := map[string][]cstr{}
+	for k, v := range a.cols {
+		base, _ := splitAlias(k)
+		groupA[base] = append(groupA[base], v)
+	}
+	groupB := map[string][]cstr{}
+	for k, v := range b.cols {
+		base, _ := splitAlias(k)
+		groupB[base] = append(groupB[base], v)
+	}
 	shared := 0
-	for col, ca := range a.cols {
-		cb, ok := b.cols[col]
+	for base, cbs := range groupB {
+		cas, ok := groupA[base]
 		if !ok {
 			continue
 		}
+		if len(cas) > 1 || len(cbs) > 1 {
+			return false, false // 同名列出现多次（多表别名），配不准，按未知处理
+		}
 		shared++
-		if !cstrOverlap(ca, cb) {
+		if !cstrOverlap(cas[0], cbs[0]) {
 			return false, true // 某一列明确不相交 → 两条语句不可能同时命中同一行
 		}
 	}

@@ -3286,7 +3286,7 @@ function renderLogs() {
         <span class="m">${l.ms || 0}ms · ${l.stmts || 0}条 · ${l.affected || 0}行</span>
         ${logVersion(l) ? `<span class="chip">${esc(logVersion(l))}</span>` : ''}
       </div>
-      <div class="ldet" id="ld${i}" style="display:none">${esc(logDetail(l))}</div>`;
+      <div class="ldet" id="ld${i}" style="display:block">${esc(logDetail(l))}</div>`;
   }).join('');
 }
 function logVersion(l) {

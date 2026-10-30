@@ -94,6 +94,77 @@ func TestExecAppliesEveryStatement(t *testing.T) {
 	}
 }
 
+// rowLockFree: 这一行是不是没人锁着。
+// 用 SELECT ... FOR UPDATE + 1 秒锁等待来判断：能拿到锁说明确实没有别的事务
+// 还压着这把锁（也就是那条失败的事务真的结束了）。
+// 不用 INNODB_TRX：它需要 PROCESS 权限，权限不够时只能看到自己的事务，
+// 结果永远是 0，等于什么也没验证。
+func rowLockFree(t *testing.T, ds DataSource, table string, id int) bool {
+	t.Helper()
+	conn, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Exec("SET SESSION innodb_lock_wait_timeout = 1"); err != nil {
+		t.Fatalf("设置锁等待超时失败: %v", err)
+	}
+	tx, err := conn.Begin()
+	if err != nil {
+		t.Fatalf("开事务失败: %v", err)
+	}
+	defer tx.Rollback()
+	var n int
+	err = tx.QueryRow("SELECT n FROM " + table + " WHERE id = " + itoa(id) + " FOR UPDATE").Scan(&n)
+	return err == nil
+}
+
+// proveLockDetection: 正控。先故意锁住那一行，确认检测能看出「被锁」；
+// 看不出就说明这个手段无效，后面的「没锁」也不可信。
+func proveLockDetection(t *testing.T, ds DataSource) {
+	t.Helper()
+	holder, err := openDB(ds)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer holder.Close()
+	tx, err := holder.Begin()
+	if err != nil {
+		t.Fatalf("开事务失败: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE exec_a SET n = n + 1 WHERE id = 1`); err != nil {
+		tx.Rollback()
+		t.Fatalf("正控写入失败: %v", err)
+	}
+	if rowLockFree(t, ds, "exec_a", 1) {
+		tx.Rollback()
+		t.Fatal("行明明被锁着却判定为「没锁」，这个检测手段无效")
+	}
+	tx.Rollback()
+	if !rowLockFree(t, ds, "exec_a", 1) {
+		t.Fatal("正控回滚后仍然判定为「被锁」，检测不可靠")
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	neg := i < 0
+	if neg {
+		i = -i
+	}
+	var b []byte
+	for i > 0 {
+		b = append([]byte{byte('0' + i%10)}, b...)
+		i /= 10
+	}
+	if neg {
+		return "-" + string(b)
+	}
+	return string(b)
+}
+
 // 把失败语句插到每一个位置，每次都必须零残留
 func TestExecFailureAtAnyPositionLeavesNothing(t *testing.T) {
 	ds := smokeDS(t)
@@ -102,6 +173,9 @@ func TestExecFailureAtAnyPositionLeavesNothing(t *testing.T) {
 		t.Fatalf("连接失败: %v", err)
 	}
 	defer db.Close()
+
+	// 先证明「能看出行被锁住」，否则后面的「没锁」是空话
+	proveLockDetection(t, ds)
 
 	good := []string{
 		`UPDATE exec_a SET v='CHANGED' WHERE id=1`,
@@ -139,14 +213,9 @@ func TestExecFailureAtAnyPositionLeavesNothing(t *testing.T) {
 		}
 		// 不能只看「另一个连接读不到」：事务若挂在那里没提交也没回滚，
 		// 读起来同样看不到。这里直接查还有没有未结束的事务。
-		var trx int
-		if e := db.QueryRow(`SELECT COUNT(*) FROM information_schema.INNODB_TRX
-			WHERE trx_state='RUNNING' AND trx_mysql_thread_id <> CONNECTION_ID()`).Scan(&trx); e != nil {
-			// 查不到就没法确认事务已结束，不能当没事发生
-			t.Fatalf("查 INNODB_TRX 失败，无法确认事务已结束: %v", e)
-		}
-		if trx > 0 {
-			t.Fatalf("失败于第 %d 位后仍有 %d 个未结束事务，可能既没提交也没回滚", pos+1, trx)
+		// 失败后那行必须没人锁着：锁还在就说明事务既没提交也没回滚
+		if !rowLockFree(t, ds, "exec_a", 1) {
+			t.Fatalf("失败于第 %d 位后 exec_a(1) 仍被锁着，事务可能没回滚", pos+1)
 		}
 	}
 }

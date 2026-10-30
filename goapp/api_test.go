@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -628,5 +630,109 @@ func TestAPIDatasourceTest(t *testing.T) {
 	m := decode(t, rec)
 	if _, has := m["ok"]; !has {
 		t.Fatalf("应返回 ok 字段：%v", m)
+	}
+}
+
+// ---- 代下载升级包（POST /api/update/fetch）----
+
+func setUpdateURLForTest(t *testing.T, u string) {
+	t.Helper()
+	mu.Lock()
+	s := loadStore()
+	s.Settings.UpdateURL = u
+	err := saveStore(s)
+	mu.Unlock()
+	if err != nil {
+		t.Fatalf("写设置失败: %v", err)
+	}
+}
+
+// newUpdateSource 起一个极小的升级源：version.json + 一个可选的真实包
+func newUpdateSource(t *testing.T, ver, fileName string, payload []byte, sha string) *httptest.Server {
+	t.Helper()
+	files := map[string]any{
+		platformName(): map[string]any{"url": fileName, "sha256": sha},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/version.json", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"version": ver, "build": "test", "notes": "n", "files": files,
+		})
+	})
+	if fileName != "" && payload != nil {
+		mux.HandleFunc("/"+fileName, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(payload)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestAPIUpdateFetchRejectsBadName(t *testing.T) {
+	setupHome(t)
+	srv := newUpdateSource(t, "9.9.9", "../../data.json", []byte("x"), strings.Repeat("a", 64))
+	setUpdateURLForTest(t, srv.URL)
+
+	out := decode(t, call(t, http.MethodPost, "/api/update/fetch", map[string]any{}))
+	if out["ok"] == true {
+		t.Fatalf("不合规包名应被拒绝: %v", out)
+	}
+	ents, _ := os.ReadDir(filepath.Join(appHome, "updates"))
+	if len(ents) > 0 {
+		t.Fatalf("被拒绝后不该留下任何文件，实际 %v", ents)
+	}
+}
+
+func TestAPIUpdateFetchRejectsShaMismatch(t *testing.T) {
+	setupHome(t)
+	name := "update-tool-" + platformName() + "-9.9.9-abcdef.zip"
+	srv := newUpdateSource(t, "9.9.9", name, []byte("我在传输中坏了"), strings.Repeat("b", 64))
+	setUpdateURLForTest(t, srv.URL)
+
+	out := decode(t, call(t, http.MethodPost, "/api/update/fetch", map[string]any{}))
+	if out["ok"] == true {
+		t.Fatalf("sha256 不符必须拒绝: %v", out)
+	}
+	ents, _ := os.ReadDir(filepath.Join(appHome, "updates"))
+	for _, e := range ents {
+		if e.Name() == name || strings.HasSuffix(e.Name(), ".part") {
+			t.Fatalf("校验失败后不该留下 %s", e.Name())
+		}
+	}
+}
+
+func TestAPIUpdateFetchSucceeds(t *testing.T) {
+	setupHome(t)
+	payload := []byte("PK\x03\x04fake-zip-body")
+	sum := sha256.Sum256(payload)
+	name := "update-tool-" + platformName() + "-9.9.9-abcdef.zip"
+	srv := newUpdateSource(t, "9.9.9", name, payload, hex.EncodeToString(sum[:]))
+	setUpdateURLForTest(t, srv.URL)
+
+	out := decode(t, call(t, http.MethodPost, "/api/update/fetch", map[string]any{}))
+	if out["ok"] != true {
+		t.Fatalf("应当下载成功: %v", out)
+	}
+	got, err := os.ReadFile(filepath.Join(appHome, "updates", name))
+	if err != nil {
+		t.Fatalf("落盘的文件读不到: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("落盘内容不一致")
+	}
+}
+
+func TestAPIUpdateFetchRejectsDowngrade(t *testing.T) {
+	setupHome(t)
+	payload := []byte("old")
+	sum := sha256.Sum256(payload)
+	name := "update-tool-" + platformName() + "-1.0.0-abcdef.zip"
+	srv := newUpdateSource(t, "1.0.0", name, payload, hex.EncodeToString(sum[:]))
+	setUpdateURLForTest(t, srv.URL)
+
+	out := decode(t, call(t, http.MethodPost, "/api/update/fetch", map[string]any{}))
+	if out["ok"] == true {
+		t.Fatalf("不比当前版本新的包应被拒绝: %v", out)
 	}
 }

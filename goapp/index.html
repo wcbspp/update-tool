@@ -1076,7 +1076,7 @@
 </main>
 
 
-<div class="mask" id="mask"><div class="dlg" id="dlg"></div></div>
+<div class="mask" id="mask"><div class="dlg" id="dlg" role="dialog" aria-modal="true"></div></div>
 <div class="mask" id="logmask"><div class="dlg wide" id="logdlg"></div></div>
 <div class="toast" id="toast"></div>
 <div class="cfgBad" id="cfgBad"><b>配置文件读不出来</b>
@@ -2907,6 +2907,8 @@ function safeRender(fn) {
 const REPO_URL = 'https://github.com/wcbspp/update-tool';
 let UPDATE_INFO = null;
 let UPDATE_BASE = '';
+let UPD_AUTO_SHOWN = false;   // 本次启动是否已经自动提示过
+let UPD_SNOOZED = false;      // 点了「稍后」：本次启动不再自动提示
 let LISTEN_MODE = 'local';
 let APP_VERSION = '';
 
@@ -2925,24 +2927,16 @@ async function checkUpdate(fresh) {
 }
 
 // 点版本号：显示版本信息、更新说明（如有）和仓库地址
-async function openUpdate() {
+async function openUpdate(auto) {
   // 每次点开都重新取一次，避免显示缓存里的旧版本
   try { await checkUpdate(true); } catch (e) {}
   if (!UPDATE_BASE) {
     try { const st = await api('/api/settings'); if (st && st.updateUrl) UPDATE_BASE = st.updateUrl; } catch (e) {}
   }
   const r = UPDATE_INFO;
-  const _plat = navigator.platform || '';
-  const isMac = /Mac|iPhone|iPad/.test(_plat);
-  const isLinux = /Linux|X11/.test(_plat) && !/Android/.test(navigator.userAgent || '');
-  // 选对应平台；没有就用 win 兜底，但 Linux 上绝不下 Windows 包
+  // 有没有包只看服务端（程序跑在哪台，就下哪台的包），不在浏览器侧猜
   let f = null;
-  if (r) {
-    if (isMac) f = r.mac || null;
-    else if (isLinux) f = r.linux || null;
-    else f = r.win || null;
-    if (!f) f = r.win || r.mac || r.linux || null;
-  }
+  if (r) f = r[r.platform || 'win'] || null;
   const dlg = $('dlg');
   dlg.className = 'dlg';
 
@@ -2955,7 +2949,7 @@ async function openUpdate() {
          <b style="color:#7fb2ff">${esc(r.latest || '')}</b><br>
          <span style="color:#9fb0c6">更新说明</span>　${esc(r.notes || '—')}
        </div>
-       <div class="updHow">下载后：解压覆盖原来的程序文件，重新打开即可生效；
+       <div class="updHow" id="updHow">下载后：解压覆盖原来的程序文件，重新打开即可生效；
          <b>data.json 配置不受影响</b>，不用重新连接数据库。</div>`
     : `<div style="font-size:12.5px;color:#c2cfe1;line-height:1.9;margin-top:6px">
          当前版本：<b style="color:#7fb2ff">${esc(APP_VERSION || '—')}</b><br>
@@ -2965,31 +2959,50 @@ async function openUpdate() {
   dlg.innerHTML = `<h3>${head}</h3>
     ${body}
     <div class="kvRow"><span class="kvK">更新服务器</span>
-      ${UPDATE_BASE
-        ? `<a class="kvV kvLink" href="${esc(UPDATE_BASE)}" target="_blank" rel="noopener" title="点开看看，有东西">${esc(UPDATE_BASE)} ↗</a>`
-        : `<code class="kvV" title="只读，修改请到设置">未配置</code>`}</div>
+      ${safeHttpUrl(UPDATE_BASE)
+        ? `<a class="kvV kvLink" href="${esc(safeHttpUrl(UPDATE_BASE))}" target="_blank" rel="noopener" title="点开看看，有东西">${esc(UPDATE_BASE)} ↗</a>`
+        : `<code class="kvV" title="只读，修改请到设置">${esc(UPDATE_BASE || '未配置')}</code>`}</div>
     <div class="repoBox">
       <span class="repoLbl">仓库</span>
       <a href="${REPO_URL}" target="_blank" rel="noopener"><span class="repoIco"><svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></span>${esc(REPO_URL.replace('https://github.com/', ''))} ↗</a>
     </div>
     <div class="foot"><span class="l"></span>
+      ${r ? `<button id="uLater">稍后</button>` : ''}
       <button id="uCancel">关闭</button>
-      ${f ? `<button class="primary" id="uGo">下载 ${isMac ? 'macOS' : 'Windows'} 版</button>` : ''}</div>`;
+      ${f ? `<button class="primary" id="uGo">下载到本机</button>` : ''}</div>`;
   $('mask').classList.add('on');
   $('uCancel').onclick = () => $('mask').classList.remove('on');
-  if (f) $('uGo').onclick = () => {
-    // 清单里的下载地址来自远端，只接受 http/https，其他一律不点
-    const url = safeHttpUrl(r.base + f.url);
-    if (!url) { toast('下载地址不合法，已取消', 'bad'); return; }
-    // 用临时 a 触发下载：不导航当前页，也不会被弹窗拦截
-    const a = document.createElement('a');
-    a.href = url;
-    a.rel = 'noopener';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    $('mask').classList.remove('on');
-    toast('已开始下载：解压覆盖原程序后重新打开即可', 'ok');
+  // 弹窗打开后把焦点送进去；自动弹的那次不抢主按钮，避免用户正在敲字时误触下载
+  setTimeout(() => {
+    const b = auto ? ($('uLater') || $('uCancel')) : ($('uGo') || $('uCancel'));
+    if (b) b.focus();
+  }, 30);
+  if (r) $('uLater').onclick = () => { UPD_SNOOZED = true; $('mask').classList.remove('on'); };
+  if (f) $('uGo').onclick = async () => {
+    const btn = $('uGo');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = '下载中…';
+    try {
+      // 由本机服务代下载并校验 sha256，用户不用自己去找文件
+      const res = await api('/api/update/fetch', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}'
+      }, 330000);
+      if (!res || !res.ok) throw new Error((res && res.error) || '下载失败');
+      const mb = (res.size / 1048576).toFixed(1);
+      $('updHow').innerHTML = '已下载并校验完整（' + mb + ' MB）：<br>'
+        + '<code style="color:#7fb2ff;word-break:break-all">' + esc(res.path) + '</code><br>'
+        + '<a href="/dl/updates/' + encodeURIComponent(res.name) + '" download>下载到这台电脑</a>'
+        + '　解压后覆盖原程序，重新打开即可。<br>'
+        + '<span style="color:#9fb0c6">sha256 校验只证明文件完整、没被传坏，不证明升级源本身没被篡改；升级源请用 https。</span>';
+      toast('已下载并校验完整', 'ok');
+      btn.textContent = '已下载';
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = old;
+      toast('下载失败：' + ((e && e.message) || '未知原因'), 'bad');
+    }
   };
 }
 
@@ -3436,7 +3449,15 @@ function initResizer() {
     if (vt) vt.onclick = () => openUpdate();
     const gb = $('ghBtn');
     if (gb) gb.onclick = () => openUpdate();
-    setTimeout(() => { try { checkUpdate(); } catch (e) {} }, 1200);
+    setTimeout(() => {
+      checkUpdate().then(() => {
+        // 每次启动只主动提醒一次；点过「稍后」就不再打扰
+        if (UPDATE_INFO && !UPD_AUTO_SHOWN && !UPD_SNOOZED) {
+          UPD_AUTO_SHOWN = true;
+          try { openUpdate(true); } catch (e) {}
+        }
+      }).catch(() => {});
+    }, 1200);
     // 每 20 秒确认服务仍在响应，绿点据此闪烁/变红
     setInterval(() => {
       fetch('/api/health', { cache: 'no-store' }).then(r => r.json()).then(h => {

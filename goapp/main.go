@@ -898,7 +898,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.1.3"
+const appVersion = "1.1.4"
 
 type cell = any
 
@@ -1088,6 +1088,12 @@ var (
 	reBatch        = regexp.MustCompile(`(?i)([A-Za-z0-9_]+)_update_([A-Za-z0-9]+)`)
 	reIdentTok     = regexp.MustCompile("[A-Za-z_][A-Za-z0-9_$]*(?:\\.[A-Za-z_][A-Za-z0-9_$]*)?|,")
 )
+
+// 更新包大小上限：超过就不往盘里写，防止被巨型文件拖死
+const maxUpdateBytes = 300 << 20
+
+// 同一时刻只允许一个下载：两个请求会往同一个 .part 写
+var updFetchMu sync.Mutex
 
 // 5.6 / Linux 下表名区分大小写，先按不区分大小写解析出真实表名
 func resolveTable(db *sql.DB, schema, name string) string {
@@ -4072,11 +4078,81 @@ var (
 var defaultUpdateURL = ""
 
 // effectiveUpdateURL: 设置里填了就用它；没填则用构建时注入的默认值（开源版为空＝不检查更新）
+// 只接受 https：version.json 里的 sha256 和升级包走同一条通道，
+// 明文 http 下两者能被一起改写，校验就不成立。本机 http 放行方便调试。
+// shortcut: 不防本机已篡改的配置文件，只堵住网络中间人。
 func effectiveUpdateURL(raw string) string {
-	if u := strings.TrimSpace(raw); u != "" {
+	u := strings.TrimSpace(raw)
+	if u == "" {
+		u = strings.TrimSpace(defaultUpdateURL)
+	}
+	if u == "" {
+		return ""
+	}
+	if strings.HasPrefix(u, "https://") {
 		return u
 	}
-	return defaultUpdateURL
+	if strings.HasPrefix(u, "http://127.0.0.1") || strings.HasPrefix(u, "http://localhost") {
+		return u
+	}
+	return ""
+}
+
+// versionLess 比较 x.y.z 三段数字。解析不了就返回 false（宁可不提示，不乱引导降级）。
+func versionLess(a, b string) bool {
+	split := func(s string) ([]int, bool) {
+		parts := strings.Split(strings.TrimSpace(s), ".")
+		if len(parts) != 3 {
+			return nil, false
+		}
+		out := make([]int, 3)
+		for i, p := range parts {
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 0 {
+				return nil, false
+			}
+			out[i] = n
+		}
+		return out, true
+	}
+	x, ok1 := split(a)
+	y, ok2 := split(b)
+	if !ok1 || !ok2 {
+		return false
+	}
+	for i := 0; i < 3; i++ {
+		if x[i] != y[i] {
+			return x[i] < y[i]
+		}
+	}
+	return false
+}
+
+// platformName 把 runtime.GOOS 映射成清单里的键，前端和下载都用它，避免两头各算一次。
+func platformName() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "mac"
+	case "linux":
+		return "linux"
+	}
+	return "win"
+}
+
+// releaseVersionFromName 从 update-tool-win-1.1.4-abcdef.zip 里取出 1.1.4
+func releaseVersionFromName(name string) string {
+	if !reReleaseZip.MatchString(name) {
+		return ""
+	}
+	s := strings.TrimSuffix(strings.TrimPrefix(name, "update-tool-"), ".zip")
+	// 去掉最前面的平台段和最里面的 hex 后缀
+	if i := strings.Index(s, "-"); i >= 0 {
+		s = s[i+1:]
+	}
+	if i := strings.LastIndex(s, "-"); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
 
 func fetchVersion(base string, fresh bool) (map[string]any, error) {
@@ -4455,6 +4531,23 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	// 页面
 	// 下载三平台安装包（白名单，不接受任意路径）
+	// 代下载下来的升级包也要能从浏览器取走：局域网模式下程序在服务器上跑，
+	// 文件落在 appHome/updates，没有这个出口的话远程用户拿不到包。
+	if r.Method == http.MethodGet && strings.HasPrefix(p, "/dl/updates/") {
+		name := strings.TrimPrefix(p, "/dl/updates/")
+		if !reReleaseZip.MatchString(name) {
+			http.NotFound(w, r)
+			return
+		}
+		full := filepath.Join(appHome, "updates", name)
+		if fi, err := os.Lstat(full); err != nil || !fi.Mode().IsRegular() {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("content-disposition", "attachment; filename=\""+name+"\"")
+		http.ServeFile(w, r, full)
+		return
+	}
 	if r.Method == http.MethodGet && strings.HasPrefix(p, "/dl/") {
 		files := map[string]string{
 			"update-tool.exe":   "release-win/update-tool.exe",
@@ -4852,7 +4945,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		mu.Unlock()
 		base := effectiveUpdateURL(st.Settings.UpdateURL)
 		if base == "" {
-			writeJSON(w, 200, map[string]any{"enabled": false, "reason": "未配置升级源"})
+			writeJSON(w, 200, map[string]any{"enabled": false, "reason": "未配置升级源，或升级源不是 https"})
 			return
 		}
 		if !strings.HasSuffix(base, "/") {
@@ -4866,7 +4959,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		latest, _ := ver["version"].(string)
 		out := map[string]any{
 			"enabled": true, "current": appVersion, "latest": latest,
-			"hasUpdate": latest != "" && latest != appVersion,
+			"hasUpdate": versionLess(appVersion, latest),
+			"platform":  platformName(),
 			"notes":     ver["notes"], "build": ver["build"], "base": base,
 		}
 		if files, ok := ver["files"].(map[string]any); ok {
@@ -4881,6 +4975,119 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, 200, out)
+
+	case r.Method == http.MethodPost && p == "/api/update/fetch":
+		// 服务端代下载 + sha256 校验：用户不用自己去下载目录找文件
+		if !updFetchMu.TryLock() {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "已经在下载中，等它结束"})
+			return
+		}
+		defer updFetchMu.Unlock()
+		mu.Lock()
+		st := loadStore()
+		mu.Unlock()
+		base := effectiveUpdateURL(st.Settings.UpdateURL)
+		if base == "" {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "未配置升级源"})
+			return
+		}
+		if !strings.HasSuffix(base, "/") {
+			base += "/"
+		}
+		ver, err := fetchVersion(base, true)
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "读取版本清单失败：" + err.Error()})
+			return
+		}
+		plat := "win"
+		switch runtime.GOOS {
+		case "darwin":
+			plat = "mac"
+		case "linux":
+			plat = "linux"
+		}
+		files, _ := ver["files"].(map[string]any)
+		f, _ := files[plat].(map[string]any)
+		if f == nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "升级源里没有 " + plat + " 平台的包"})
+			return
+		}
+		name, _ := f["url"].(string)
+		want := strings.ToLower(strings.TrimSpace(fmt.Sprint(f["sha256"])))
+		// 包名必须是发版脚本生成的格式，同时挡住路径穿越
+		if !reReleaseZip.MatchString(name) {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "升级源给出的包名不合规，已拒绝下载"})
+			return
+		}
+		if want == "" || want == "<nil>" {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "升级源没有提供 sha256，无法校验，已拒绝下载"})
+			return
+		}
+		// 清单回滚时不能反过来引导用户降级
+		if pv := releaseVersionFromName(name); pv != "" && !versionLess(appVersion, pv) {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "升级源里的包（" + pv + "）并不比当前版本新，已拒绝下载"})
+			return
+		}
+		dir := filepath.Join(appHome, "updates")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "建不了存放目录：" + err.Error()})
+			return
+		}
+		resp, err := (&http.Client{Timeout: 5 * time.Minute}).Get(base + name)
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "下载失败：" + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": fmt.Sprintf("下载失败：服务器返回 %d", resp.StatusCode)})
+			return
+		}
+		tmp := filepath.Join(dir, name+".part")
+		out, err := os.Create(tmp)
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "写不了临时文件：" + err.Error()})
+			return
+		}
+		h := sha256.New()
+		n, cerr := io.Copy(io.MultiWriter(out, h), io.LimitReader(resp.Body, maxUpdateBytes+1))
+		cerr2 := out.Close()
+		if cerr != nil || cerr2 != nil {
+			os.Remove(tmp)
+			reason := ""
+			if cerr != nil {
+				reason = cerr.Error()
+			} else if cerr2 != nil {
+				reason = cerr2.Error()
+			}
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "下载中断，已丢弃：" + reason})
+			return
+		}
+		if n > maxUpdateBytes {
+			os.Remove(tmp)
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "包太大，已拒绝"})
+			return
+		}
+		got := hex.EncodeToString(h.Sum(nil))
+		if got != want {
+			os.Remove(tmp)
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "校验失败：文件可能损坏或被篡改，已丢弃"})
+			return
+		}
+		final := filepath.Join(dir, name)
+		// 先直接改名（Unix 原子覆盖）。Windows 上若有进程占着旧文件会失败，
+		// 此时才删旧的再试一次，避免“先删后改名失败”把好包也弄丢。
+		if err := os.Rename(tmp, final); err != nil {
+			if rmErr := os.Remove(final); rmErr == nil {
+				err = os.Rename(tmp, final)
+			}
+			if err != nil {
+				os.Remove(tmp)
+				writeJSON(w, 200, map[string]any{"ok": false, "error": "保存失败：" + err.Error()})
+				return
+			}
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "path": final, "name": name, "size": n, "sha256": got})
 
 	case r.Method == http.MethodGet && p == "/api/tree":
 		mu.Lock()

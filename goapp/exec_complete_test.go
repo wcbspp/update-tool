@@ -3,7 +3,10 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // 执行的硬约束：整段脚本是一个事务。
@@ -232,9 +235,16 @@ func TestDriverRejectsMultiStatements(t *testing.T) {
 
 	_, err = db.Exec("UPDATE exec_a SET v='x' WHERE id=1; UPDATE exec_a SET v='y' WHERE id=1")
 	if err == nil {
-		// 有些中间件（HotDB/DRDS）在代理层就把一条 Exec 拆成多条执行，
-		// 驱动层的 multiStatements 防御对它们不生效。这是平台差异，不是配置错误。
-		t.Skip("该数据库在服务端拆分多语句（代理行为），驱动层无法拒绝；本工具自身总是逐条发送，不受影响")
+		// 代理可能在服务端拆分多语句，这一条在中间件上不可判定；
+		// 但「我们的 DSN 一定没开 multiStatements」是平台无关的，换成断言它。
+		cfg, perr := mysql.ParseDSN(os.Getenv("MYSQL_TEST_DSN"))
+		if perr != nil {
+			t.Fatalf("DSN 解析失败: %v", perr)
+		}
+		if cfg.MultiStatements {
+			t.Fatal("DSN 打开了 multiStatements，事务边界不可靠")
+		}
+		t.Skipf("该数据库在服务端拆分多语句（代理行为）；已改为断言 DSN 未开启 multiStatements")
 	}
 	// 光报错不够：还要确认第一条没被执行掉
 	var v string

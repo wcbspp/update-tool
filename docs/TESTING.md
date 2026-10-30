@@ -136,3 +136,21 @@ MYSQL_TEST_DSN=... go test -run 'TestSmoke' -v   # 端到端
 - 新增用例必须**能真失败**：断言要检查具体字段和具体文案，不能只看状态码。
 - 跳过（`t.Skip`）必须说明原因，且不能掩盖该测的行为。
 - 涉及 DROP/写入的用例一律走 `MYSQL_TEST_DSN`，禁止指向生产库。
+
+## 在 DRDS / HotDB 这类中间件上跑
+
+中间件里通常没有 `_test` 结尾的库，而用例会 DROP TABLE，所以默认闸门会拒绝。
+确认目标库确实不是生产库后，可以显式放行：
+
+```bash
+MYSQL_TEST_ALLOW_NON_TEST=1 \
+MYSQL_TEST_DSN='user:pass@tcp(127.0.0.1:3323)/POLCENT_DB' \
+go test ./... -count=1
+```
+
+放行后请注意：
+
+- 用例会 DROP/CREATE 自己的临时表（`exec_*`、`pf_*`、`smoke_*`、`zz_*` 前缀），不会碰其它表
+- 无建库/建用户/SLEEP 权限时，相关用例会**明确跳过并打印原因**，不算通过
+- 中间件在服务端拆分多语句时，`TestDriverRejectsMultiStatements` 改为断言 DSN 未开启 `multiStatements`
+- 实测耗时约为本机 MySQL 的 60 倍（每条元数据查询都要经代理）

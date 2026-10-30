@@ -194,3 +194,22 @@ func TestValidateTextNoFalseTruncation(t *testing.T) {
 		}
 	}
 }
+
+// 多表 DELETE 的别名必须还原成真实表名，否则引擎检查会去查一张叫 "a" 的表，
+// 查不到就静默放过——「这些表改不回来」的提示整条消失，界面却仍说已回滚。
+func TestWriteTargetRefsResolvesDeleteAliases(t *testing.T) {
+	cases := map[string]string{
+		"DELETE a FROM zz_m1 a JOIN zz_m2 b ON a.id = b.id":             "zz_m1",
+		"DELETE FROM a USING zz_m1 a JOIN zz_m2 b ON a.id = b.id":       "zz_m1",
+		"DELETE FROM zz_m1 USING zz_m1 JOIN zz_m2 b ON zz_m1.id = b.id": "zz_m1",
+	}
+	for st, want := range cases {
+		got := map[string]bool{}
+		for _, r := range writeTargetRefs([]string{st}, "cur") {
+			got[r.name] = true
+		}
+		if !got[want] {
+			t.Fatalf("%s\n  应包含目标表 %s，实际 %v", st, want, got)
+		}
+	}
+}

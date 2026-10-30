@@ -311,7 +311,9 @@ func TestMain(m *testing.M) {
 			fmt.Fprintf(os.Stderr, "拒绝运行：MYSQL_TEST_DSN 解析失败（%v）\n", err)
 			os.Exit(1)
 		}
-		if !strings.HasSuffix(strings.ToLower(cfg.DBName), "_test") {
+		// 中间件（DRDS/HotDB）里通常没有 _test 库；设 MYSQL_TEST_ALLOW_NON_TEST=1 可显式放行。
+		// 放行等于接受「用例会 DROP TABLE」的风险，只能指向明确不是生产的库。
+		if !strings.HasSuffix(strings.ToLower(cfg.DBName), "_test") && os.Getenv("MYSQL_TEST_ALLOW_NON_TEST") != "1" {
 			fmt.Fprintf(os.Stderr, "拒绝运行：库名 %q 不以 _test 结尾，测试会 DROP TABLE\n", cfg.DBName)
 			os.Exit(1)
 		}

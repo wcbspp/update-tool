@@ -924,6 +924,7 @@ var errPreflightTimeout = errors.New("预检超时")
 
 var sessWarnOnce sync.Once
 var sessLockWarnOnce sync.Once
+var sessReadbackWarn sync.Once
 
 // sessInitConnector：每条新连接建好后设置 SELECT 超时（5.7.8 以下/代理不支持时忽略错误）
 type sessInitConnector struct {
@@ -987,6 +988,14 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// 有些中间件（DRDS/HotDB）对 SET 不报错也不生效，读回一次确认超时保护真的存在；
+	// 否则「会话超时」形同虚设，出事时没人知道。
+	var lwt int64
+	if err := db.QueryRow("SELECT @@session.lock_wait_timeout").Scan(&lwt); err == nil && lwt > 3600 {
+		sessReadbackWarn.Do(func() {
+			log.Printf("提示：本数据库接受但忽略 lock_wait_timeout（读回 %d 秒），元数据锁等待只能靠客户端超时取消", lwt)
+		})
 	}
 	return db, nil
 }
@@ -1080,15 +1089,26 @@ func writeTargetRefs(stmts []string, schema string) []tableRef {
 				}
 			}
 		case "delete":
+			// 三种写法都要还原别名：DELETE FROM t、DELETE t FROM t JOIN、
+			// DELETE FROM 别名 USING t 别名 JOIN。别名的表查不到引擎，
+			// 「这些表改不回来」的提示就会整条消失。
+			am := aliasToTable(st)
+			var raws []string
 			if m := reDelete.FindStringSubmatch(st); m != nil {
-				add(m[1])
-			} else if mm := reDeleteMulti.FindStringSubmatch(st); mm != nil {
-				// DELETE t1 FROM t1 JOIN t2 ...：只认 FROM 前面那串表名
+				raws = append(raws, m[1])
+			}
+			if mm := reDeleteMulti.FindStringSubmatch(st); mm != nil {
 				for _, part := range splitTopLevel(mm[1]) {
 					if fs := strings.Fields(strings.TrimSpace(part)); len(fs) > 0 {
-						add(strings.Trim(fs[0], "`\""))
+						raws = append(raws, strings.Trim(fs[0], "`\""))
 					}
 				}
+			}
+			for _, raw := range raws {
+				if realT, ok := am[strings.ToUpper(trimIdent(raw))]; ok && realT != "" {
+					raw = realT
+				}
+				add(raw)
 			}
 		}
 	}
@@ -1119,12 +1139,12 @@ func nonTransactionalTables(db *sql.DB, refs []tableRef, sec int) []string {
 }
 
 // friendlyDBErr 把中间件特有的报错翻成人话，别让用户以为是自己 SQL 写错了
-func friendlyDBErr(msg string) string {
+func friendlyDBErr(msg string) (string, bool) {
 	low := strings.ToLower(msg)
 	if strings.Contains(low, "xa transaction") && strings.Contains(low, "not supported") {
-		return "这个数据库中间件不支持在一个事务里跨库操作。请把涉及不同库的语句拆成两次执行；纯查询可以放在一起跑。（原始报错：" + msg + "）"
+		return "这个数据库中间件不支持在一个事务里跨库操作。请把涉及不同库的语句拆成两次执行；纯查询可以放在一起跑。（原始报错：" + msg + "）", true
 	}
-	return msg
+	return msg, false
 }
 
 func runStatements(ds DataSource, stmts []string) (map[string]stmtResult, int, string, int64) {
@@ -1169,13 +1189,21 @@ func runStatements(ds DataSource, stmts []string) (map[string]stmtResult, int, s
 			rows, qerr := db.QueryContext(qctx, st)
 			if qerr != nil {
 				qcancel()
-				return res, i, friendlyDBErr(qerr.Error()), time.Since(start).Milliseconds()
+				m, tr := friendlyDBErr(qerr.Error())
+				if !tr {
+					m = withHint(m)
+				}
+				return res, i, m, time.Since(start).Milliseconds()
 			}
 			cols, data, truncated, serr := scanRows(rows)
 			rows.Close()
 			qcancel()
 			if serr != nil {
-				return res, i, friendlyDBErr(serr.Error()), time.Since(start).Milliseconds()
+				m, tr := friendlyDBErr(serr.Error())
+				if !tr {
+					m = withHint(m)
+				}
+				return res, i, m, time.Since(start).Milliseconds()
 			}
 			if data == nil {
 				data = [][]cell{}
@@ -1197,7 +1225,10 @@ func runStatements(ds DataSource, stmts []string) (map[string]stmtResult, int, s
 			r.Affected = 0
 			res[k] = r
 		}
-		msg := withHint(friendlyDBErr(e.Error()))
+		msg, translated := friendlyDBErr(e.Error())
+		if !translated {
+			msg = withHint(msg)
+		}
 		// 回滚本身失败时，绝不能告诉用户「已回滚」——那会让人放心重跑，数据被改两遍
 		if rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			msg = "回滚可能未完成（" + rbErr.Error() + "）。请先人工核对前 " + strconv.Itoa(i) + " 条语句的影响，不要直接重跑。原始错误：" + msg
@@ -2816,6 +2847,9 @@ func updateTableParts(s string) []string {
 	return out
 }
 
+// FROM 后面紧跟 USING 的写法：DELETE FROM a USING t a ...
+var reFromAliasUsing = regexp.MustCompile("(?is)^\\s*`?[\\w$]+`?\\s+using\\s+")
+
 func aliasToTable(st string) map[string]string {
 	low := strings.ToLower(st)
 	k := -1
@@ -2837,6 +2871,11 @@ func aliasToTable(st string) map[string]string {
 		return nil
 	}
 	rest := st[k+4:]
+	// DELETE FROM <目标别名> USING 表 别名 JOIN ...：FROM 后面是别名，
+	// 真实表名在 USING 之后。不从 USING 之后扫，还原就等于没做。
+	if m := reFromAliasUsing.FindString(rest); m != "" {
+		rest = rest[len(m):]
+	}
 	for _, kw := range []string{"where", "group", "order", "limit", "having"} {
 		rest = cutAtKeyword(rest, kw)
 	}
@@ -3176,7 +3215,7 @@ func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 			IFNULL(p.db,''), IFNULL(p.user,'')
 		FROM information_schema.INNODB_TRX t
 		LEFT JOIN information_schema.PROCESSLIST p ON p.id = t.trx_mysql_thread_id
-		WHERE t.trx_rows_modified > 0`)
+		WHERE t.trx_rows_modified > 0 LIMIT 200`)
 	if err != nil {
 		// 关联失败（中间件/权限）时至少报个数，别静默当没有。
 		// 用新 ctx：上面那条可能已经因超时把 ctx 取消了。
@@ -5003,6 +5042,11 @@ func findScriptByID(s Store, id string) (Script, bool) {
 // 执行入口的兜底：找出会清空整表/分区的 DELETE。返回 1-based 序号、提示、是否命中。
 func findUnsafeStatement(stmts []string) (int, string, bool) {
 	for idx, st := range stmts {
+		// SELECT ... INTO OUTFILE / DUMPFILE 会往数据库主机写文件，
+		// 不在「只读」的语义里，闸门要拦。
+		if up := strings.ToUpper(stripSQLComments(st)); strings.Contains(up, "INTO OUTFILE") || strings.Contains(up, "INTO DUMPFILE") {
+			return idx + 1, "这条语句会往数据库主机写文件（INTO OUTFILE/DUMPFILE），不在工具的只读语义里，已拒绝执行", true
+		}
 		plain := reDeleteMods.ReplaceAllString(st, "delete ")
 		kind := stmtKind(plain)
 		if kind == "update" {

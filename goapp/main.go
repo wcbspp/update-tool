@@ -1118,6 +1118,15 @@ func nonTransactionalTables(db *sql.DB, refs []tableRef, sec int) []string {
 	return bad
 }
 
+// friendlyDBErr 把中间件特有的报错翻成人话，别让用户以为是自己 SQL 写错了
+func friendlyDBErr(msg string) string {
+	low := strings.ToLower(msg)
+	if strings.Contains(low, "xa transaction") && strings.Contains(low, "not supported") {
+		return "这个数据库中间件不支持在一个事务里跨库操作。请把涉及不同库的语句拆成两次执行；纯查询可以放在一起跑。（原始报错：" + msg + "）"
+	}
+	return msg
+}
+
 func runStatements(ds DataSource, stmts []string) (map[string]stmtResult, int, string, int64) {
 	start := time.Now()
 	res := map[string]stmtResult{}
@@ -1143,6 +1152,39 @@ func runStatements(ds DataSource, stmts []string) (map[string]stmtResult, int, s
 		return context.WithCancel(baseCtx)
 	}
 
+	// 全部只读时不开事务：DRDS/HotDB 不支持一个事务里跨 schema，
+	// 而「跨库联查」在 MySQL 上很常见，全塞进事务会在 DRDS 上直接失败。
+	// 只读本来也不需要事务语义。
+	allReadOnly := len(stmts) > 0
+	for _, st := range stmts {
+		if !isQuery(st) && !isShowLike(st) {
+			allReadOnly = false
+			break
+		}
+	}
+	if allReadOnly {
+		for i, st := range stmts {
+			t0 := time.Now()
+			qctx, qcancel := perStmt()
+			rows, qerr := db.QueryContext(qctx, st)
+			if qerr != nil {
+				qcancel()
+				return res, i, friendlyDBErr(qerr.Error()), time.Since(start).Milliseconds()
+			}
+			cols, data, truncated, serr := scanRows(rows)
+			rows.Close()
+			qcancel()
+			if serr != nil {
+				return res, i, friendlyDBErr(serr.Error()), time.Since(start).Milliseconds()
+			}
+			if data == nil {
+				data = [][]cell{}
+			}
+			res[strconv.Itoa(i)] = stmtResult{Columns: cols, Rows: data, Truncated: truncated, MS: time.Since(t0).Milliseconds()}
+		}
+		return res, -1, "", time.Since(start).Milliseconds()
+	}
+
 	tx, err := db.BeginTx(baseCtx, nil)
 	if err != nil {
 		return res, -1, err.Error(), time.Since(start).Milliseconds()
@@ -1155,7 +1197,7 @@ func runStatements(ds DataSource, stmts []string) (map[string]stmtResult, int, s
 			r.Affected = 0
 			res[k] = r
 		}
-		msg := withHint(e.Error())
+		msg := withHint(friendlyDBErr(e.Error()))
 		// 回滚本身失败时，绝不能告诉用户「已回滚」——那会让人放心重跑，数据被改两遍
 		if rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			msg = "回滚可能未完成（" + rbErr.Error() + "）。请先人工核对前 " + strconv.Itoa(i) + " 条语句的影响，不要直接重跑。原始错误：" + msg
@@ -1455,7 +1497,7 @@ func resolveTableOK(db *sql.DB, schema, name string) (string, bool) {
 	ctx, cancel := metaCtx()
 	defer cancel()
 	err := db.QueryRowContext(ctx, `SELECT TABLE_NAME FROM information_schema.TABLES
-		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) LIMIT 1`, schema, name).Scan(&actual)
+		WHERE TABLE_SCHEMA=? AND TABLE_NAME=? LIMIT 1`, schema, name).Scan(&actual)
 	if err == nil && actual != "" {
 		return actual, true
 	}
@@ -1753,7 +1795,7 @@ func (mc *metaCache) entry(schema, table string) *metaTable {
 func fetchCols(db *sql.DB, schema, table string) map[string]bool {
 	out := map[string]bool{}
 	rows, err := infQuery(db, `SELECT UPPER(COLUMN_NAME), UPPER(IS_NULLABLE) FROM information_schema.COLUMNS
-		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)`, schema, table)
+		WHERE TABLE_SCHEMA=? AND TABLE_NAME=?`, schema, table)
 	if err == nil {
 		for rows.Next() {
 			var n, nul string
@@ -1933,7 +1975,7 @@ func mTablesHavingCol(db *sql.DB, schema string, refs []tblRef, col string) []tb
 func keyCols(db *sql.DB, schema, t string) ([]string, string) {
 	rows, err := infQuery(db, `SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX
 		FROM information_schema.STATISTICS
-		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) AND NON_UNIQUE=0
+		WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND NON_UNIQUE=0
 		ORDER BY (INDEX_NAME='PRIMARY') DESC, INDEX_NAME, SEQ_IN_INDEX`, schema, t)
 	if err != nil {
 		// 华为 DRDS 等中间件可能不支持这类查询，直接走 SHOW INDEX
@@ -1966,7 +2008,7 @@ func keyCols(db *sql.DB, schema, t string) ([]string, string) {
 	// 一次性取该表所有列的可空性，避免逐列查询
 	nullableCols := map[string]bool{}
 	if rows, err := infQuery(db, `SELECT UPPER(COLUMN_NAME), UPPER(IS_NULLABLE) FROM information_schema.COLUMNS
-		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)`, schema, t); err == nil {
+		WHERE TABLE_SCHEMA=? AND TABLE_NAME=?`, schema, t); err == nil {
 		for rows.Next() {
 			var name, nul string
 			if rows.Scan(&name, &nul) == nil {
@@ -2119,7 +2161,7 @@ func indexesOf(db *sql.DB, schema, t string) (map[string][]string, []string) {
 	defer cancel()
 	rows, err := db.QueryContext(ctx, `SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX
 		FROM information_schema.STATISTICS
-		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)
+		WHERE TABLE_SCHEMA=? AND TABLE_NAME=?
 		ORDER BY INDEX_NAME, SEQ_IN_INDEX`, schema, t)
 	if err == nil {
 		defer rows.Close()
@@ -3097,7 +3139,7 @@ func engineWarnings(db *sql.DB, sure, unsure []tableRef, pfSec int) []map[string
 			seen[k] = true
 			var engine sql.NullString
 			err := db.QueryRowContext(ctx, `SELECT ENGINE FROM information_schema.TABLES
-				WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) LIMIT 1`, r.schema, r.name).Scan(&engine)
+				WHERE TABLE_SCHEMA=? AND TABLE_NAME=? LIMIT 1`, r.schema, r.name).Scan(&engine)
 			if err != nil || !engine.Valid || engine.String == "" {
 				continue // 查不到（中间件/权限/超时）时不要误报
 			}
@@ -3134,7 +3176,7 @@ func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 			IFNULL(p.db,''), IFNULL(p.user,'')
 		FROM information_schema.INNODB_TRX t
 		LEFT JOIN information_schema.PROCESSLIST p ON p.id = t.trx_mysql_thread_id
-		WHERE t.trx_rows_modified > 0 AND (p.db = ? OR p.db IS NULL OR ? = '')`, schema, schema)
+		WHERE t.trx_rows_modified > 0`)
 	if err != nil {
 		// 关联失败（中间件/权限）时至少报个数，别静默当没有。
 		// 用新 ctx：上面那条可能已经因超时把 ctx 取消了。
@@ -3154,6 +3196,11 @@ func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 		var id, started, dbName, user string
 		var n int64
 		if rows.Scan(&id, &started, &n, &dbName, &user) != nil {
+			continue
+		}
+		// 库过滤放在 Go 里做：DRDS 的 PROCESSLIST 一带占位符就挂死 20 秒，
+		// 而这句本来也只返回极少几行。
+		if schema != "" && dbName != "" && !strings.EqualFold(dbName, schema) {
 			continue
 		}
 		who := "会话"
@@ -4216,7 +4263,14 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			switch {
 			case reDeleteUsing.MatchString(st):
 				mm := reDeleteUsing.FindStringSubmatch(st)
-				sch, nm := tblSchemaOf(schema, mm[1])
+				// DELETE FROM a USING t a JOIN ...：这里拿到的可能是别名
+				raw := mm[1]
+				if am := aliasToTable(st); am != nil {
+					if realT, ok := am[strings.ToUpper(trimIdent(raw))]; ok {
+						raw = realT
+					}
+				}
+				sch, nm := tblSchemaOf(schema, raw)
 				real := mResolveTable(db, sch, normTable(nm))
 				targets = append(targets, real)
 				countSchema = sch
@@ -4287,7 +4341,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				case lim > 0:
 					add(i, "warn", "没有 WHERE 条件", fmt.Sprintf("这条 DELETE 没有 WHERE，按 LIMIT %d 最多删 %d 行，请确认不是笔误", lim, lim))
 				case multi || strings.Contains(strings.ToUpper(st), " JOIN "):
-					add(i, "warn", "没有 WHERE 条件", "这条 DELETE 的删除范围由 JOIN 条件决定，请确认关联范围")
+					add(i, "error", "没有 WHERE 条件", "这条 DELETE 没有 WHERE，JOIN 的 ON 只是关联条件；执行入口会拒绝它。确实要按关联删除请显式写 WHERE 1=1")
 				default:
 					add(i, "error", "没有 WHERE 条件", "这条 DELETE 会清空整张表，已阻止执行；确实要清空请加 LIMIT 或改成 TRUNCATE")
 				}
@@ -5363,11 +5417,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 		stats := dump(`SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME
 			FROM information_schema.STATISTICS
-			WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)
+			WHERE TABLE_SCHEMA=? AND TABLE_NAME=?
 			ORDER BY INDEX_NAME, SEQ_IN_INDEX`, schema, resolved)
 		kcu := dump(`SELECT CONSTRAINT_NAME, COLUMN_NAME, ORDINAL_POSITION
 			FROM information_schema.KEY_COLUMN_USAGE
-			WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)
+			WHERE TABLE_SCHEMA=? AND TABLE_NAME=?
 			ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`, schema, resolved)
 		cols, idxName := keyCols(db, schema, resolved)
 

@@ -1053,13 +1053,9 @@ func writeTargetRefs(stmts []string, schema string) []tableRef {
 				add(m[1])
 			}
 		case "update":
-			if tables, _, ok := splitUpdate(st); ok {
-				for _, part := range splitTopLevel(tables) {
-					// 直接取原样的首个标识符：parseTableRef 会把库名剥掉，
-					// 这里要的恰好是带库名的原始写法。
-					if fs := strings.Fields(strings.TrimSpace(part)); len(fs) > 0 {
-						add(fs[0])
-					}
+			if tables, set, ok := splitUpdate(st); ok {
+				for _, raw := range updateWriteTables(tables, set) {
+					add(raw)
 				}
 			}
 		case "delete":
@@ -1230,6 +1226,64 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 }
 
 /* ---------------- 体检（DML 预检） ---------------- */
+
+// updateWriteTables 找出 UPDATE 真正写入的表：只有 SET 左边的别名算数。
+// 逗号列表里只读参与的关联表（比如维度表）不算写入目标，
+// 否则会把它当成「非事务引擎、改动无法回滚」误报出来。
+func updateWriteTables(tablesPart, setPart string) []string {
+	type ent struct{ raw, alias string }
+	ents := make([]ent, 0, 2)
+	for _, part := range splitTopLevel(tablesPart) {
+		fs := strings.Fields(strings.TrimSpace(part))
+		if len(fs) == 0 {
+			continue
+		}
+		raw := strings.Trim(fs[0], "`\"")
+		if raw == "" {
+			continue
+		}
+		_, alias := parseTableRef(part)
+		ents = append(ents, ent{raw, strings.ToUpper(alias)})
+	}
+	if len(ents) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ents))
+	seen := map[string]bool{}
+	push := func(raw string) {
+		if raw == "" || seen[raw] {
+			return
+		}
+		seen[raw] = true
+		out = append(out, raw)
+	}
+	for _, asg := range splitTopLevel(setPart) {
+		lhs := asg
+		if i := strings.Index(asg, "="); i >= 0 {
+			lhs = asg[:i]
+		}
+		lhs = strings.TrimSpace(lhs)
+		if dot := strings.Index(lhs, "."); dot >= 0 {
+			alias := strings.ToUpper(strings.Trim(lhs[:dot], "`\" "))
+			for _, e := range ents {
+				if e.alias == alias {
+					push(e.raw)
+					break
+				}
+			}
+		} else if len(ents) == 1 {
+			// 单表写法 SET v = ...，没有别名可对
+			push(ents[0].raw)
+		}
+	}
+	if len(out) == 0 {
+		// 拿不准就退回全收：宁可多算一张，也别漏掉真正的写入表
+		for _, e := range ents {
+			push(e.raw)
+		}
+	}
+	return out
+}
 
 // 标识符链：t / db.t / `db`.`t` / `t`。mysqldump 的输出就是带反引号的形状，
 // 用 [\w$.]+ 只能吃到反引号前面那一小段，后面的解析全错。

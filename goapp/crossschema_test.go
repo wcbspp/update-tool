@@ -90,3 +90,35 @@ func TestSplitStatementsKeepsCommentSeparator(t *testing.T) {
 		t.Fatalf("注释被无空格吞掉，值会被改写：%q", got[0])
 	}
 }
+
+// 逗号多表 UPDATE：只有 SET 左边的别名才是写入目标，
+// 只读参与的关联表不能算进去（否则会误报「非事务引擎、改不回来」）。
+func TestWriteTargetRefsSkipsReadOnlyJoinTable(t *testing.T) {
+	got := map[string]bool{}
+	for _, r := range writeTargetRefs([]string{
+		"UPDATE inn t, dim d SET t.v = d.v WHERE t.id = d.id",
+	}, "cur") {
+		got[r.schema+"."+r.name] = true
+	}
+	if !got["cur.inn"] {
+		t.Fatalf("应包含写入表 cur.inn，实际 %v", got)
+	}
+	if got["cur.dim"] {
+		t.Fatalf("dim 只读参与，不应算写入目标：%v", got)
+	}
+}
+
+// 两张表都被 SET 赋值时，两张都要算
+func TestWriteTargetRefsMultiTableBothWritten(t *testing.T) {
+	got := map[string]bool{}
+	for _, r := range writeTargetRefs([]string{
+		"UPDATE a x, b y SET x.v = 1, y.v = 2 WHERE x.id = y.id",
+	}, "cur") {
+		got[r.schema+"."+r.name] = true
+	}
+	for _, want := range []string{"cur.a", "cur.b"} {
+		if !got[want] {
+			t.Fatalf("缺少写入表 %s，实际 %v", want, got)
+		}
+	}
+}

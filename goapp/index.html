@@ -1032,10 +1032,15 @@
   .navmask{display:none;}
 
   @media (max-width: 900px){
-    header{height:auto;min-height:50px;padding:6px 10px;gap:7px;flex-wrap:nowrap;overflow-x:auto;}
+    header{height:auto;min-height:50px;padding:6px 10px;gap:6px;flex-wrap:nowrap;overflow-x:auto;}
     header .sp{display:none;}
-    header h1{font-size:14px;white-space:nowrap;}
+    header h1{font-size:13px;white-space:nowrap;}
     .navBtn{display:inline-flex;}
+    /* 窄屏只留状态点：连接数/脚本数这类信息太占地方 */
+    .who{display:none;}
+    #verText{display:none;}
+    header .sm{font-size:11.5px;padding:0 8px;height:30px;}
+    .verPill{padding:0 6px;}
 
     main{grid-template-columns:1fr;height:calc(100dvh - 50px);}
     aside{position:fixed;left:0;top:50px;bottom:0;width:min(84vw,300px);z-index:45;
@@ -2610,7 +2615,7 @@ async function run(dryRun) {
     if (seq !== ACT_SEQ) return;
     r.selOnly = info.selOnly;
     safeRender(() => renderRun(r, dryRun, warnN, (pf && pf.versions) || []));
-    toast(r.ok ? '执行完成' : '执行失败，已回滚', r.ok ? 'ok' : 'bad');
+    toast(r.ok ? '执行完成' : '执行失败，看结果区', r.ok ? 'ok' : 'bad');
   } catch (e) {
     if (seq === ACT_SEQ) { showErr(e.message); toast(e.message, 'bad'); }
   } finally {
@@ -2646,6 +2651,16 @@ function showErr(msg) {
   $('res').innerHTML = `<div class="rhead"><span class="badge bad">失败</span></div><div class="errbox">${esc(msg)}</div>`;
 }
 
+// 后端已明确说「提交/回滚结果未知」时，前端不能再盖一句「全部回滚」。
+// 人只看大字结论，不看下面的小字错误。
+function rollbackClaim(errText, n) {
+  const e = String(errText || '');
+  if (e.indexOf('提交结果未知') >= 0 || e.indexOf('回滚可能未完成') >= 0 || e.indexOf('非事务引擎') >= 0) {
+    return '改动是否落盘未知，请先核对数据，不要直接重跑';
+  }
+  return `前面的 ${n} 条改动全部回滚`;
+}
+
 function renderRun(r, dryRun, warnN, versions) {
   const results = r.results || {};
   const previews = r.previews || [];
@@ -2671,7 +2686,7 @@ function renderRun(r, dryRun, warnN, versions) {
   }
   if (!ok && failedAt >= 0) {
     const after = Math.max(0, count - failedAt - 1);
-    html += `<div class="note bad">第 ${failedAt + 1} 条执行失败 → 已停止；前面的 ${failedAt} 条改动全部回滚，后面 ${after} 条未执行。</div>`;
+    html += `<div class="note bad">第 ${failedAt + 1} 条执行失败 → 已停止；${rollbackClaim(r.error, failedAt)}，后面 ${after} 条未执行。</div>`;
   }
   if (r.error) html += `<div class="errbox">${esc(r.error)}</div>`;
 

@@ -48,3 +48,37 @@ func TestDryRunRejectsCrossSchemaMyISAM(t *testing.T) {
 		t.Fatalf("预演不应改动数据，实际 v=%d", v)
 	}
 }
+
+// CTE 前缀与反引号限定名：三种写法都必须能解析出真实目标表，
+// 否则「非事务引擎不能回滚」这条防线会被整条绕过。
+func TestWriteTargetRefsHandlesCteAndBackticks(t *testing.T) {
+	stmts := []string{
+		"WITH x AS (SELECT 1) UPDATE otherdb.t SET v = 1 WHERE id = 1",
+		"DELETE FROM `shop`.`u` WHERE id = 2",
+		"INSERT INTO `dst` VALUES (1)",
+	}
+	got := map[string]bool{}
+	for _, r := range writeTargetRefs(stmts, "cur") {
+		got[r.schema+"."+r.name] = true
+	}
+	for _, want := range []string{"otherdb.t", "shop.u", "cur.dst"} {
+		if !got[want] {
+			t.Fatalf("缺少目标表 %s，实际 %v", want, got)
+		}
+	}
+}
+
+func TestIsUseStmt(t *testing.T) {
+	yes := []string{"USE otherdb", "use `db2`", "  USE x", "/*c*/ USE y"}
+	no := []string{"UPDATE t SET v=1", "SELECT 'use x'", "USEFUL"}
+	for _, s := range yes {
+		if !isUseStmt(s) {
+			t.Fatalf("应识别为 USE：%q", s)
+		}
+	}
+	for _, s := range no {
+		if isUseStmt(s) {
+			t.Fatalf("不应识别为 USE：%q", s)
+		}
+	}
+}

@@ -831,6 +831,11 @@ func firstDMLIsSelect(s string) bool {
 	return true
 }
 
+func isUseStmt(s string) bool {
+	t := strings.ToUpper(strings.TrimSpace(stripSQLComments(s)))
+	return t == "USE" || strings.HasPrefix(t, "USE ")
+}
+
 func isTxnControl(s string) bool {
 	t := strings.ToUpper(strings.TrimSpace(s))
 	for _, p := range []string{"COMMIT", "ROLLBACK", "START TRANSACTION", "BEGIN", "SAVEPOINT", "SET AUTOCOMMIT"} {
@@ -999,7 +1004,9 @@ func writeTargetRefs(stmts []string, schema string) []tableRef {
 		seen[k] = true
 		out = append(out, tableRef{sch, nm})
 	}
-	for _, st := range stmts {
+	for _, st0 := range stmts {
+		// CTE 前缀会让下面的正则全部落空，守卫直接哑掉
+		st := stripCTE(st0)
 		switch stmtKind(st) {
 		case "insert":
 			if m := reInsert.FindStringSubmatch(st); m != nil {
@@ -1189,10 +1196,14 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 
 /* ---------------- 体检（DML 预检） ---------------- */
 
+// 标识符链：t / db.t / `db`.`t` / `t`。mysqldump 的输出就是带反引号的形状，
+// 用 [\w$.]+ 只能吃到反引号前面那一小段，后面的解析全错。
+var reIdentChain = "(?:`[^`]+`|[\\w$]+)(?:\\.(?:`[^`]+`|[\\w$]+))*"
+
 var (
-	reInsert = regexp.MustCompile(`(?is)^\s*(?:insert|replace)\s+(?:low_priority\s+|delayed\s+|high_priority\s+)?(?:ignore\s+)?(?:into\s+)?[\x60"]?([\w$.]+)[\x60"]?\s*(?:partition\s*\([^)]*\)\s*)?(?:\(([^)]*)\)\s*)?((?:select|values?|set)\b.*)$`)
-	reFrom   = regexp.MustCompile(`(?is)\bfrom\s+[\x60"]?([\w$.]+)[\x60"]?`)
-	reDelete = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)`)
+	reInsert = regexp.MustCompile(`(?is)^\s*(?:insert|replace)\s+(?:low_priority\s+|delayed\s+|high_priority\s+)?(?:ignore\s+)?(?:into\s+)?(` + reIdentChain + `)\s*(?:partition\s*\([^)]*\)\s*)?(?:\(([^)]*)\)\s*)?((?:select|values?|set)\b.*)$`)
+	reFrom   = regexp.MustCompile(`(?is)\bfrom\s+(` + reIdentChain + `)`)
+	reDelete = regexp.MustCompile(`(?is)^\s*delete\s+from\s+(` + reIdentChain + `)`)
 	// DELETE t1, t2 FROM ... 与 DELETE FROM t USING ...
 	reDeleteMulti = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*(.+?)\s+from\s+`)
 	// 单表：DELETE [修饰词] FROM t [AS a] 后面直接是 WHERE/ORDER/LIMIT/结尾，
@@ -5976,13 +5987,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 事务由工具统一管理：脚本里自带 COMMIT/ROLLBACK 会直接破坏预演语义
-		var txnIdx, ddlIdx []int
+		var txnIdx, ddlIdx, useIdx []int
 		for i, st := range stmts {
 			if isTxnControl(st) {
 				txnIdx = append(txnIdx, i)
 			}
 			if isDDL(st) {
 				ddlIdx = append(ddlIdx, i)
+			}
+			if isUseStmt(st) {
+				useIdx = append(useIdx, i)
 			}
 		}
 		if len(txnIdx) > 0 {
@@ -5993,6 +6007,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if len(ddlIdx) > 0 {
 			writeJSON(w, 400, map[string]any{"ok": false,
 				"error": "第 " + idxList(ddlIdx) + " 条是 DDL 或会隐式提交的语句（CREATE/ALTER/DROP/TRUNCATE/LOCK TABLES/ANALYZE/CALL 等）。它们会让“失败整体回滚”失效，已拒绝执行。请把这类语句单独拿出来在客户端执行"})
+			return
+		}
+		if len(useIdx) > 0 {
+			writeJSON(w, 400, map[string]any{"ok": false,
+				"error": "第 " + idxList(useIdx) + " 条是 USE 语句，会切换当前库，让预检看的表与实际写入的表不是同一张。工具不支持 USE：跨库请写全 库.表，或直接改数据源里的库名"})
 			return
 		}
 

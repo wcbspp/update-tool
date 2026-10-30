@@ -22,6 +22,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -692,6 +693,24 @@ func splitStatements(text string) []string {
 		case c == '#':
 			inLine = true
 		case c == '/' && n == '*':
+			// /*!nnnnn ... */ 是 MySQL 可执行注释，服务端会执行里面的内容。
+			// 整段当注释丢掉，工具跑的 SQL 就和服务端不一致，而且照样报成功。
+			if i+2 < len(rs) && rs[i+2] == '!' {
+				j := i + 3
+				for j < len(rs) && rs[j] >= '0' && rs[j] <= '9' {
+					j++
+				}
+				buf.WriteRune(' ')
+				for ; j+1 < len(rs); j++ {
+					if rs[j] == '*' && rs[j+1] == '/' {
+						break
+					}
+					buf.WriteRune(rs[j])
+				}
+				buf.WriteRune(' ')
+				i = j + 1
+				continue
+			}
 			inBlock = true
 			i++
 		case c == '\'':
@@ -1126,6 +1145,10 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 
 	results := make([]map[string]any, 0, len(stmts))
 	allOK := true
+	// 整段语法校验的总时限：几百条语句 × 每条 20 秒能拖到几小时，
+	// 这期间“语法校验”忙碌锁一直被占着，改配置全 409。
+	totalCtx, totalCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer totalCancel()
 	for i, st := range stmts {
 		if isTxnControl(st) {
 			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": "事务语句，已跳过"})
@@ -1140,9 +1163,13 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": note})
 			continue
 		}
+		if totalCtx.Err() != nil {
+			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": "校验总时长用完，这条未校验"})
+			continue
+		}
 		ctxX, cancelX := explainCtx()
-		defer cancelX()
 		rows, err := db.QueryContext(ctxX, "EXPLAIN "+st)
+		cancelX()
 		if err != nil {
 			allOK = false
 			results = append(results, map[string]any{"i": i, "ok": false, "error": withHint(err.Error())})
@@ -2145,8 +2172,6 @@ func (p *pfConns) parallel(primary *sql.DB, fns ...func(*sql.DB)) {
 	}
 	wg.Wait()
 }
-
-var reWhereWord = regexp.MustCompile(`(?is)\bwhere\b`)
 
 // 取最后一段顶层 WHERE 之后的条件
 // 只认顶层的 WHERE：子查询里的 WHERE、字符串里的 where 都不算
@@ -4302,8 +4327,9 @@ func isConfigWrite(p, method string) bool {
 	}
 	switch p {
 	case "/api/ds", "/api/group", "/api/script", "/api/order",
-		"/api/settings", "/api/shutdown":
-		// settings 可能在执行中被改成别的监听范围并触发重启；shutdown 会直接杀进程
+		"/api/settings", "/api/shutdown", "/api/import":
+		// settings 可能在执行中被改成别的监听范围并触发重启；shutdown 会直接杀进程；
+		// import 会整份覆盖脚本和口令，正在跑的那批就找不到对应配置了
 		return true
 	}
 	return false
@@ -4586,9 +4612,17 @@ func findUnsafeStatement(stmts []string) (int, string, bool) {
 		plain := reDeleteMods.ReplaceAllString(st, "delete ")
 		kind := stmtKind(plain)
 		if kind == "update" {
-			// 多表 UPDATE 用 JOIN ... ON 限定行，没有顶层 WHERE 不等于整表改写
-			bare := strings.ToUpper(stripSQLComments(plain))
-			limited := strings.Contains(bare, " JOIN ") || deleteLimit(plain) > 0
+			// 多表 UPDATE 用 JOIN ... ON 限定行，没有顶层 WHERE 不等于整表改写。
+			// 只看 SET 之前的表段：子查询里的 JOIN 不代表这行有范围限制。
+			limited := false
+			if tablesPart, _, okUpd := splitUpdate(plain); okUpd {
+				if j, _ := indexTopLevelWord(strings.ToUpper(stripSQLComments(tablesPart)), "join"); j >= 0 {
+					limited = true
+				}
+			}
+			if !limited && deleteLimit(plain) > 0 {
+				limited = true
+			}
 			if whereTail(plain) == "" && !limited {
 				return idx + 1, "这条 UPDATE 没识别到 WHERE 条件；如果确实要改全表，请写成 WHERE 1=1 明确表达", true
 			}
@@ -5009,6 +5043,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && p == "/api/health":
 		mu.Lock()
 		stH := loadStore()
+		// storeCorrupt 是在锁内写的，读出同一把锁，否则是数据竞争
+		badStore := storeCorrupt
 		mu.Unlock()
 		mode := stH.Settings.ListenMode
 		if mode == "" {
@@ -5016,7 +5052,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "version": appVersion, "build": buildTime,
 			"pid": os.Getpid(), "listenMode": mode, "host": os.Getenv("HOST"),
-			"corrupt": storeCorrupt, "appName": appNameOf(stH)})
+			"corrupt": badStore, "appName": appNameOf(stH)})
 
 	case r.Method == http.MethodPost && p == "/api/shutdown":
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -5090,13 +5126,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, map[string]any{"ok": false, "error": "读取版本清单失败：" + err.Error()})
 			return
 		}
-		plat := "win"
-		switch runtime.GOOS {
-		case "darwin":
-			plat = "mac"
-		case "linux":
-			plat = "linux"
-		}
+		// 走同一个平台映射，避免两头各算一次、改一处漏一处
+		plat := platformName()
 		files, _ := ver["files"].(map[string]any)
 		f, _ := files[plat].(map[string]any)
 		if f == nil {
@@ -5602,6 +5633,22 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		mu.Lock()
 		s := loadStore()
+		// 文件夹可能已经被别的标签页删掉了。不校验就会建出一个挂在不存在的
+		// 文件夹下的脚本：界面报保存成功，树里却永远看不到。
+		if b.GroupID != "" {
+			okGroup := false
+			for _, g := range s.Groups {
+				if g.ID == b.GroupID {
+					okGroup = true
+					break
+				}
+			}
+			if !okGroup {
+				mu.Unlock()
+				writeJSON(w, 400, map[string]any{"ok": false, "error": "这个文件夹已经被删掉了，请刷新页面后再保存"})
+				return
+			}
+		}
 		idx := -1
 		for i := range s.Scripts {
 			if s.Scripts[i].ID == b.ID && b.ID != "" {
@@ -6109,7 +6156,8 @@ func ensureInstance(port string) bool {
 	c := &http.Client{Timeout: 3 * time.Second}
 	shutdownURL := "http://127.0.0.1:" + port + "/api/shutdown"
 	if key := os.Getenv("ACCESS_KEY"); key != "" && key != "off" {
-		shutdownURL += "?k=" + key
+		// 密钥里可能有 & # 空格，不编码会把后面的参数截掉，旧进程不退出、新进程绑不上端口
+		shutdownURL += "?k=" + url.QueryEscape(key)
 	}
 	if resp, err := c.Post(shutdownURL, "application/json", nil); err == nil {
 		resp.Body.Close()
@@ -6245,7 +6293,7 @@ func main() {
 
 	openURL := "http://127.0.0.1:" + port + "/"
 	if key := os.Getenv("ACCESS_KEY"); key != "" && key != "off" {
-		openURL += "?k=" + key
+		openURL += "?k=" + url.QueryEscape(key)
 	}
 	if !ensureInstance(port) {
 		openBrowser(openURL)
@@ -6267,11 +6315,16 @@ func main() {
 	}
 }
 
-// writeStartupLog 把启动失败写进 logs/startup.log，方便双击启动的用户排查
+// writeStartupLog 把启动失败写进程序目录的 logs/startup.log。
+// 双击启动时 cwd 可能是 system32 之类的地方，写相对路径等于丢掉。
 func writeStartupLog(err error) {
-	_ = os.MkdirAll("logs", 0o755)
+	dir := logsDir
+	if dir == "" {
+		dir = "logs"
+	}
+	_ = os.MkdirAll(dir, 0o700)
 	line := time.Now().Format("2006-01-02 15:04:05") + " 启动失败: " + err.Error() + "\n"
-	_ = os.WriteFile("logs/startup.log", []byte(line), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "startup.log"), []byte(line), 0o600)
 }
 
 func lanIPs() []string {

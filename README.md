@@ -1,8 +1,11 @@
 # update-tool
 
-内部工具，用来管理、预检并执行业务目录（药品 / 诊疗项目 / 医用耗材）的增量更新 SQL。
+把「批量增量更新 SQL」管住的执行工具：脚本集中管理、执行前预检、整段事务执行、出错整体回滚。
 
 Go 单文件服务 + 内嵌网页，零运行时依赖：Windows 双击 `exe` 即用，macOS / Linux 直接运行单个二进制。
+
+> 内置默认名称是 `update-tool`。设置里可以改成任何名字（界面标题、说明页、启动提示都会跟着变）。
+> 本仓库的示例沿用了业务目录增量更新的场景，工具本身与具体业务无关。
 
 ---
 
@@ -114,10 +117,10 @@ medupdate.exe
 release-win/medupdate.exe      Windows amd64
 release-mac/medupdate          macOS arm64
 release-linux/medupdate        Linux amd64
-dist/update-tool.app        macOS 应用包（自动同步新二进制并重签名）
+dist/update-tool.app             macOS 应用包（自动同步新二进制并重签名；已有旧名包时 build.sh 会沿用）
 ```
 
-需要 Go 1.21+。构建使用 `CGO_ENABLED=0`、`-trimpath -ldflags "-s -w"`，产物约 7 MB，无外部依赖。
+需要 Go 1.21+。构建使用 `CGO_ENABLED=0`、`-trimpath -ldflags "-s -w"`，产物约 8 MB，无外部依赖。
 
 ---
 

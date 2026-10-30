@@ -28,7 +28,11 @@ GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../medupdate .
 
 # macOS App 包里的二进制也要更新，否则双击 app 跑的还是老代码
 echo "→ 更新 macOS App 包"
-APP="../dist/update-tool.app"
+APP="${APP_BUNDLE:-../dist/update-tool.app}"
+# 本机老部署用的是中文包名；目录存在就沿用，避免改名后这里静默跳过、双击跑的还是老代码
+if [ ! -d "$APP" ] && [ -d "../dist/update-tool.app" ]; then
+  APP="../dist/update-tool.app"
+fi
 if [ -d "$APP" ]; then
   cp ../release-mac/medupdate "$APP/Contents/MacOS/medupdate"
   chmod +x "$APP/Contents/MacOS/medupdate"

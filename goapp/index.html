@@ -1022,10 +1022,44 @@
 
 
   .busyNum{display:inline-block;min-width:3.2em;text-align:right;}
+
+  /* ---------- 手机端（≤900px）----------
+     全部写在媒体查询里：PC 端一行不变。
+     思路：侧栏变抽屉，主区占满，弹窗按屏幕宽度收窄。 */
+  .navBtn{display:none;align-items:center;justify-content:center;width:34px;height:34px;
+    flex:none;border-radius:8px;border:1px solid #2a3444;background:#1b2230;color:#cdd9ea;
+    font-size:16px;line-height:1;cursor:pointer;}
+  .navmask{display:none;}
+
+  @media (max-width: 900px){
+    header{height:auto;min-height:50px;padding:6px 10px;gap:7px;flex-wrap:nowrap;overflow-x:auto;}
+    header .sp{display:none;}
+    header h1{font-size:14px;white-space:nowrap;}
+    .navBtn{display:inline-flex;}
+
+    main{grid-template-columns:1fr;height:calc(100dvh - 50px);}
+    aside{position:fixed;left:0;top:50px;bottom:0;width:min(84vw,300px);z-index:45;
+      transform:translateX(-100%);transition:transform .18s;box-shadow:8px 0 26px #000a;}
+    body.nav-open aside{transform:none;}
+    .navmask{position:fixed;left:0;right:0;top:50px;bottom:0;background:#0009;z-index:44;}
+    body.nav-open .navmask{display:block;}
+
+    section.pane{padding:8px 9px;}
+    .ln{width:30px;padding:10px 5px 10px 0;font-size:12px;}
+
+    .dlg{width:calc(100vw - 22px);max-height:88dvh;padding:14px 13px 10px;}
+    .dlg.wide{width:calc(100vw - 22px);}
+
+    /* 手指点不中 18px 的小按钮 */
+    .node .acts button{width:30px;height:30px;}
+    .node .acts button.more{width:28px;height:28px;}
+    .foot button{min-height:36px;padding:0 14px;}
+  }
 </style>
 </head>
 <body>
 <header>
+  <button class="navBtn" id="navBtn" aria-label="打开脚本目录" onclick="toggleNav()">☰</button>
   <div class="brand">
     <h1>update-tool</h1>
     <span class="verPill" id="verTag" title="点击查看版本信息" style="visibility:hidden"><span id="verText"></span><span class="upd-dot" id="updDot" style="display:none"></span><button class="ghBtn" id="ghBtn" title="关于与版本" aria-label="关于与版本"><svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></button></span>
@@ -1039,6 +1073,7 @@
 </header>
 
 <main>
+  <div class="navmask" id="navmask" onclick="closeNav()"></div>
   <aside>
     <div class="search" style="margin-top:9px"><input id="q" placeholder="搜索脚本…" oninput="queueTree()"></div>
     <div class="tree" id="tree" role="tree" aria-label="脚本目录"></div>
@@ -2207,6 +2242,7 @@ function clearEditor() {
 }
 async function selectScript(id) {
   if (busyBlocked()) return;
+  if (isNarrow()) closeNav();   // 手机上选完就把抽屉收起来，把屏幕让给编辑器
   if (dirty && !confirm('当前 SQL 未保存，确定切换？')) return;
   const seq = ++ACT_SEQ;     // 快速切换时，晚到的旧响应直接丢弃
   let r;
@@ -3403,6 +3439,11 @@ async function clearLogs() {
 }
 
 /* ================= 结果区分隔条 ================= */
+// 手机端：侧栏抽屉。只在 ≤900px 有意义，PC 上 .navBtn 不显示。
+function isNarrow() { return window.matchMedia('(max-width: 900px)').matches; }
+function toggleNav() { document.body.classList.toggle('nav-open'); }
+function closeNav() { document.body.classList.remove('nav-open'); }
+
 function initResizer() {
   let dragging = false;
   $('rz').addEventListener('mousedown', e => {

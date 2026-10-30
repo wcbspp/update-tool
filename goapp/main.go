@@ -648,6 +648,9 @@ func splitStatements(text string) []string {
 			if c == '*' && n == '/' {
 				inBlock = false
 				i++
+				// 注释当分隔符用：'x'/*c*/'y' 在 MySQL 里是 'xy'，
+				// 不留空格会粘成 'x''y'，静默改写要写入的值。
+				buf.WriteRune(' ')
 			}
 			continue
 		}
@@ -718,6 +721,7 @@ func splitStatements(text string) []string {
 				continue
 			}
 			inBlock = true
+			buf.WriteRune(' ')
 			i++
 		case c == '\'':
 			inS = true
@@ -831,6 +835,22 @@ func firstDMLIsSelect(s string) bool {
 	return true
 }
 
+func isSetStmt(s string) bool {
+	t := strings.ToUpper(strings.TrimSpace(stripSQLComments(s)))
+	return t == "SET" || strings.HasPrefix(t, "SET ")
+}
+
+// isShowLike：这些语句前面加 EXPLAIN 会被 MySQL 判成语法错误
+func isShowLike(s string) bool {
+	t := strings.ToUpper(strings.TrimSpace(stripSQLComments(s)))
+	for _, p := range []string{"SHOW", "DESC", "DESCRIBE", "EXPLAIN", "TABLE "} {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func isUseStmt(s string) bool {
 	t := strings.ToUpper(strings.TrimSpace(stripSQLComments(s)))
 	return t == "USE" || strings.HasPrefix(t, "USE ")
@@ -870,6 +890,18 @@ func preview(s string) string {
 /* ---------------- 数据库 ---------------- */
 
 var sessWarnOnce sync.Once
+var sessLockWarnOnce sync.Once
+
+// dsPfSec 把数据源里的预检查询超时换算成秒：-1=不限（返回 0），0=默认 20，其余原样。
+func dsPfSec(d DataSource) int {
+	switch {
+	case d.PFSec == -1:
+		return 0
+	case d.PFSec > 0:
+		return d.PFSec
+	}
+	return 20
+}
 
 // sessInitConnector：每条新连接建好后设置 SELECT 超时（5.7.8 以下/代理不支持时忽略错误）
 type sessInitConnector struct {
@@ -889,6 +921,15 @@ func (c sessInitConnector) Connect(ctx context.Context) (driver.Conn, error) {
 					log.Printf("提示：服务端不支持 max_execution_time（%v），预检将只靠客户端超时兜底", err)
 				})
 			}
+		}
+	}
+	// 元数据查询等 MDL 锁默认可以等一年，一次 ALTER 就能让预检卡半小时
+	// 并且一直占着全局忙碌锁。会话级压到 20 秒。
+	if ex, ok := conn.(driver.ExecerContext); ok {
+		if _, err := ex.ExecContext(ctx, "SET SESSION lock_wait_timeout = 20", nil); err != nil {
+			sessLockWarnOnce.Do(func() {
+				log.Printf("提示：服务端不支持 lock_wait_timeout（%v），元数据查询仍可能长时间等待", err)
+			})
 		}
 	}
 	return conn, nil
@@ -1067,7 +1108,7 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 
 	// 非事务引擎上 rollback 什么也回滚不了。预演必须拒绝，
 	// 否则界面会说「已回滚」，而数据其实已经落盘。
-	badEng := nonTransactionalTables(db, writeTargetRefs(stmts, ds.Database), 20)
+	badEng := nonTransactionalTables(db, writeTargetRefs(stmts, ds.Database), dsPfSec(ds))
 	if dry && len(badEng) > 0 {
 		return res, -1, "这些表不是事务引擎，预演无法回滚，已拒绝：" + strings.Join(badEng, "、"), time.Since(start).Milliseconds()
 	}
@@ -1167,13 +1208,17 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": "事务语句，已跳过"})
 			continue
 		}
-		if isDDL(st) || isQuery(st) {
-			// SHOW / DESC / TABLE 前面加 EXPLAIN 会被 MySQL 判成语法错误，这类不校验
-			note := "DDL 无法静态校验"
-			if !isDDL(st) {
-				note = "SHOW / DESC 类语句无法用 EXPLAIN 校验"
+		if isDDL(st) || isShowLike(st) {
+			// SHOW / DESC / EXPLAIN 前面加 EXPLAIN 会被 MySQL 判成语法错误，这类不校验
+			note := "SHOW / DESC / EXPLAIN 类语句无法用 EXPLAIN 校验"
+			if isDDL(st) {
+				note = "DDL 无法静态校验"
 			}
 			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": note})
+			continue
+		}
+		if isUseStmt(st) || isSetStmt(st) {
+			results = append(results, map[string]any{"i": i, "ok": true, "skipped": true, "note": "会话语句（SET/USE）无法静态校验"})
 			continue
 		}
 		if totalCtx.Err() != nil {
@@ -4365,6 +4410,9 @@ func saveFailed(w http.ResponseWriter, err error) {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("content-type", "application/json; charset=utf-8")
 	w.Header().Set("cache-control", "no-store")
+	// 客户端断网/休眠时写响应会永久阻塞：handler 出不来，忙碌锁也放不掉。
+	// 读侧已有 60s 保护，写侧单独给一个上限。
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(60 * time.Second))
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }

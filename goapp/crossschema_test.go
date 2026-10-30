@@ -82,3 +82,15 @@ func TestIsUseStmt(t *testing.T) {
 		}
 	}
 }
+
+// 块注释当分隔符用：'x'/*c*/'y' 在 MySQL 里等于 'xy'，
+// 把注释连同位置一起删掉会变成 'x”y'（x'y），静默改写要写入的值。
+func TestSplitStatementsKeepsCommentSeparator(t *testing.T) {
+	got := splitStatements("SELECT 'x'/*c*/'y';")
+	if len(got) != 1 {
+		t.Fatalf("应当拆成 1 条，实际 %d 条：%v", len(got), got)
+	}
+	if strings.Contains(got[0], "'x''y'") {
+		t.Fatalf("注释被无空格吞掉，值会被改写：%q", got[0])
+	}
+}

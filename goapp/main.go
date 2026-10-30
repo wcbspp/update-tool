@@ -282,6 +282,11 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 func explainDBError(msg string) string {
 	low := strings.ToLower(msg)
 	switch {
+	// 超时：context 被取消，驱动报的是英文原文，用户看不出是超时。
+	// 这条会被预检/校验/执行共用，所以不能只讲写入，也不能断定「已回滚」。
+	case strings.Contains(low, "context deadline exceeded") || strings.Contains(low, "context canceled"):
+		return "语句超时或已中断。查询类走数据源里的「DQL 超时」，写入类走「DML 超时」" +
+			"（预检里单条重查询还受「预检查询超时」限制）。执行阶段的超时会整批回滚，不要直接重跑。"
 	case strings.Contains(msg, "1130"):
 		return "来源 IP 未被允许。请让 DBA 把这台机器的 IP 加进白名单；走 ZeroTier 时来源是 127.0.0.1"
 	case strings.Contains(msg, "1045"):
@@ -891,7 +896,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.0.19"
+const appVersion = "1.1.0"
 
 type cell = any
 

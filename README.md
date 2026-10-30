@@ -118,8 +118,8 @@ MYSQL_TEST_DSN='root:口令@tcp(127.0.0.1:3306)/medupdate_test' go test ./...
 
 | 环境 | 用例 | 结果 |
 |---|---|---|
-| MySQL 8.4.13 | 135 个用例函数 | 132 通过 / 3 跳过 / 0 失败 |
-| MariaDB 11.6.2 | 同上 | 132 通过 / 3 跳过 / 0 失败 |
+| MySQL 8.4.13 | 136 个用例函数 | 133 通过 / 3 跳过 / 0 失败 |
+| MariaDB 11.6.2 | 同上 | 133 通过 / 3 跳过 / 0 失败 |
 | `go test -race` | 同上 | 0 数据竞争 |
 
 覆盖重点：
@@ -174,7 +174,7 @@ MYSQL_TEST_DSN='root:口令@tcp(127.0.0.1:3306)/medupdate_test' go test ./...
 release-win/medupdate.exe      Windows amd64
 release-mac/medupdate          macOS arm64
 release-linux/medupdate        Linux amd64
-dist/update-tool.app           macOS 应用包（自动同步新二进制并重签名）
+dist/<已有>.app                若 dist 下已有 .app：同步新二进制并重签名（不会新建）
 ```
 
 需要 Go 1.21+。构建使用 `CGO_ENABLED=0`、`-trimpath -ldflags "-s -w"`，产物约 8 MB，无外部依赖。

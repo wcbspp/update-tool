@@ -854,6 +854,21 @@
 
   .repoBox a{color:#7fb2ff;text-decoration:none;display:inline-flex;align-items:center;gap:6px;}
 
+  .resFull{position:fixed;inset:0;z-index:95;display:none;flex-direction:column;background:#05070b;}
+  .resFull.on{display:flex;}
+  .resFull .rfBar{display:flex;align-items:center;gap:9px;padding:9px 14px;border-bottom:1px solid #1e2836;
+    background:#0b1017;font-size:12.5px;color:#dfe8f5;}
+  .resFull .rfBar b{font-weight:600;}
+  .resFull .rfTag{color:#7b8a9f;font-size:11.5px;}
+  .resFull .rfBar .sp{flex:1;}
+  .resFull .rfBody{flex:1;overflow:auto;padding:0;}
+  .resFull .res{height:auto;overflow:visible;}
+  /* 全屏层里明细一律展开 */
+  .resFull .sbody{display:block!important;border-top:1px solid #1e2836;}
+  .resFull .chk{display:block!important;padding:7px 12px;}
+  .resFull .chk-d{display:block!important;white-space:pre-wrap!important;overflow:visible!important;
+    text-overflow:clip!important;overflow-wrap:anywhere!important;max-width:none!important;line-height:1.6!important;}
+
   .kvLink{color:#7fb2ff;text-decoration:none;border-bottom:1px dashed #3a5a86;}
 
   .kvLink:hover{color:#a9c9ff;border-bottom-color:#5c86bd;}
@@ -1102,7 +1117,7 @@ function busyBlocked() {
 }
 
 const RES_ACTIONS = '<span class="sp"></span>'
-  + '<button class="sm" onclick="openResultWindow()" title="在独立窗口打开结果（长结果更好看清、可整页搜索）">⤢</button>'
+  + '<button class="sm" onclick="openResultFull()" title="全屏查看结果（明细全部展开）">⤢</button>'
   + '<button class="sm" onclick="copyRes()">复制</button>';
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -2715,47 +2730,51 @@ function jumpToFirst(level) {
   if (!isNaN(st) && st >= 0) jumpToStmt(st);
 }
 
-// 原来只是把结果区撑高，长结果照样挤在页面布局里，还不能整页搜索。
-// 改成独立窗口：不受 .res 的高度约束，复制/查找都方便。
-function openResultWindow() {
+// 结果全屏查看：不另开窗口，直接在应用内铺一层，
+// 避免弹窗被浏览器限制成半截高度，也省掉复制出来的那些死按钮。
+function openResultFull() {
   const res = $('res');
-  // 不开带尺寸的弹窗（那种窗口不好挪），直接开普通标签页：可移动、可缩放、能整页搜索
-  const w = window.open('', '_blank');
-  if (!w) { toast('浏览器拦截了新窗口，请允许后重试', 'bad'); return; }
-  const css = [...document.querySelectorAll('style')].map(s => s.textContent).join('\n');
-  // 新窗口里没有主界面的函数：事件属性全去掉，「展开」按钮也一起去掉（不然就是个死按钮）
-  let body = res.innerHTML.replace(/\son[a-z]+="[^"]*"/gi, '');
-  body = body.replace(/<button[^>]*class="sm sbtn"[^>]*>[\s\S]{0,8}?<\/button>/gi, '');
-  w.document.open();
-  w.document.write('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
-    + '<title>执行结果</title><style>' + css + '</style></head><body>'
-    + '<style>html,body{overflow:auto!important;height:auto!important;background:#05070b;}'
-    + 'body{padding:16px;}'
-    + '.res{height:auto!important;overflow:visible!important;}'
-    + '.lwrap{max-height:none!important;}'
-    // 明细全部展开：.sbody 默认 display:none，必须强制显示；.chk-d 也不再省略
-    + '.sblock>.sbody{display:block!important;}'
-    + '.sblock>.sbody>.chk{display:block!important;padding:7px 12px;}'
-    + '.chk-d{display:block!important;white-space:pre-wrap!important;'
-    + 'overflow:visible!important;text-overflow:clip!important;overflow-wrap:anywhere!important;'
-    + 'max-width:none!important;line-height:1.6!important;}'
-    + '.chk,.sblock{cursor:default!important;}'
-    + '.shead{pointer-events:none;}'
-    + '#winbar{position:sticky;top:0;z-index:9;display:flex;gap:8px;align-items:center;'
-    + 'padding:8px 12px;margin:-16px -16px 12px;background:#0b1017ee;border-bottom:1px solid #1e2836;'
-    + 'font:12.5px -apple-system,"PingFang SC",sans-serif;color:#8fa3bd;}'
-    + '#winbar button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid #2a3444;'
-    + 'background:#151b26;color:#dfe8f5;cursor:pointer;}'
-    + '#winbar button:hover{background:#1e2a3f;}'
-    + '</style>'
-    + '<div id="winbar"><span style="flex:1">执行结果（只读快照，明细已全部展开）</span>'
-    + '<button onclick="var t=document.body.innerText;navigator.clipboard&&navigator.clipboard.writeText(t)">复制全部</button>'
-    + '<button onclick="window.close()">关闭</button></div>'
-    + '<div class="res">' + body + '</div></body></html>');
-  w.document.close();
+  if (!res || !res.innerHTML.trim()) { toast('还没有结果', 'bad'); return; }
+  let html = res.innerHTML;
+  // 去掉结果区自己的操作按钮（⤢ / 复制），全屏层已有自己的工具栏
+  html = html.replace(/<span class="sp">\s*<\/span>\s*<button[^>]*>\s*⤢\s*<\/button>\s*<button[^>]*>\s*复制\s*<\/button>/g, '');
+  // 去掉各语句的「展开」按钮（全屏层里明细默认展开）
+  html = html.replace(/<button[^>]*class="sm sbtn"[^>]*>[\s\S]{0,10}?<\/button>/gi, '');
+
+  let box = document.getElementById('resFull');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'resFull';
+    box.className = 'resFull';
+    document.body.appendChild(box);
+  }
+  box.innerHTML = '<div class="rfBar"><b>执行结果</b><span class="rfTag">只读快照 · 明细已展开</span>'
+    + '<span class="sp"></span>'
+    + '<button class="sm" id="rfCopy">复制全部</button>'
+    + '<button class="sm" id="rfClose">关闭</button></div>'
+    + '<div class="rfBody"><div class="res">' + html + '</div></div>';
+  box.classList.add('on');
+
+  $('rfClose').onclick = () => box.classList.remove('on');
+  $('rfCopy').onclick = () => {
+    const t = box.querySelector('.rfBody').innerText;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(() => toast('已复制', 'ok'));
+    } else {
+      toast('这个浏览器不让复制，手动选中吧', 'bad');
+    }
+  };
+  box.scrollTop = 0;
+  document.addEventListener('keydown', escCloseFull);
 }
 
-// 把原文里的字符区间映射到高亮层 DOM 并画一条可见色带
+function escCloseFull(e) {
+  if (e.key !== 'Escape') return;
+  const box = document.getElementById('resFull');
+  if (box) box.classList.remove('on');
+  document.removeEventListener('keydown', escCloseFull);
+}
+
 function domPos(root, offset) {
   let acc = 0;
   const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);

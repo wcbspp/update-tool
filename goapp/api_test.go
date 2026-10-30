@@ -518,7 +518,7 @@ func TestAPIInspectClosedByDefault(t *testing.T) {
 func TestAPIShutdownLoopbackOnly(t *testing.T) {
 	setupHome(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/shutdown", nil)
-	req.RemoteAddr = "127.0.0.2:5555"
+	req.RemoteAddr = "203.0.113.9:5555"
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 	if rec.Code != http.StatusForbidden {

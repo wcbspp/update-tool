@@ -56,33 +56,29 @@
   <ul>
     <li><b>语法校验</b>：逐条 <code>EXPLAIN</code>，查语法、表和字段是否存在、权限够不够；不改数据</li>
     <li><b>数据预检</b>：<mark class="hl">主键冲突</mark>、源表是否为空、列数是否一致、预计影响行数、本次数据版本</li>
-    <li><b>版本号核对</b>：从批次表的 <code>CRTER_ID</code> 取值去重，执行前摆出来；不符合 NV / LC / LT / LM 前缀的值标红</li>
+    <li><b>版本号核对</b>：从批次表的版本字段（默认 <code>CRTER_ID</code>，可在脚本设置里改）取值去重，执行前摆出来；不符合设定前缀的值标红</li>
     <li><b>执行</b>：整段 SQL 在一个事务里跑，任一语句失败<mark class="hl">整体回滚</mark>；含 <mark class="hl-warn">DDL</mark> 或 COMMIT / ROLLBACK <mark class="hl-warn">直接拒跑</mark></li>
     <li><b>执行日志</b>：每次执行留痕——时间、脚本、数据源、语句数、耗时、成败、失败位置</li>
     <li><b>只读保护</b>：SQL 默认只读，点“编辑”才能改，保存后自动切回只读</li>
     <li><b>分组管理</b>：数据源 → 文件夹 → 脚本；数据源挂在顶层文件夹上，数据预检与版本规则可按文件夹设，单条脚本可单独覆盖</li>
   </ul>
 
-  <h2>涉及的表</h2>
+  <h2>典型用法：批次表 → 正式表</h2>
+  <p>常见形态是「本批次数据先落一张 <code>*_update_*</code> 临时表，核对无误后再并进正式表」：</p>
   <table>
-    <thead><tr><th>更新源表（本批次）</th><th>目标表（正式目录）</th><th>内容</th></tr></thead>
+    <thead><tr><th>批次表（本次数据）</th><th>正式表（线上在用）</th><th>做法</th></tr></thead>
     <tbody>
-      <tr><td>hilist_b_update_2107</td><td>hilist_b</td><td>基本业务目录</td></tr>
-      <tr><td>hilist_selfpay_prop_b_update_2107</td><td>hilist_selfpay_prop_b</td><td>自付比例</td></tr>
-      <tr><td>medlist_hilist_map_b_update_2107</td><td>medlist_hilist_map_b</td><td>对照关系</td></tr>
-      <tr><td>hilist_lmtpric_d_update_2107</td><td>hilist_lmtpric_d</td><td>限价信息</td></tr>
-      <tr><td>medlist_sp_attr_mnt_b_update_2107</td><td>medlist_sp_attr_mnt_b</td><td>特殊属性（高值药品）</td></tr>
+      <tr><td>orders_update_202601</td><td>orders</td><td>关旧记录 + 插入新记录</td></tr>
+      <tr><td>prices_update_202601</td><td>prices</td><td>同步调价、停用旧价</td></tr>
     </tbody>
   </table>
+  <p>表名只是示例，工具不绑定任何具体业务表。</p>
 
-  <h2>更新内容</h2>
-  <p>基本业务目录、自付比例、限价信息、对照关系、特殊属性表（高值药品）。</p>
-
-  <h2>目录有效期规则</h2>
-  <p>更新采用“关旧开新”：把原记录的结束时间设成新目录开始日期的<mark class="hl">前一天</mark>。</p>
+  <h2>示例：关旧开新</h2>
+  <p>把原记录的结束时间设成新记录开始日期的<mark class="hl">前一天</mark>，新旧时间段首尾相接：</p>
   <pre><code>ENDDATE = DATE_SUB(B.BEGNDATE, INTERVAL 1 day)</code></pre>
-  <p>例：新目录 <code>2026-10-25</code> 生效，旧记录的 <code>ENDDATE</code> 写成 <code>2026-10-24</code>；新记录的 <code>ENDDATE</code> 为 <code>NULL</code>，表示当前有效。</p>
-  <p>关闭旧记录时一般带条件 <code>ENDDATE IS NULL OR ENDDATE &gt;= B.BEGNDATE</code>，避免把已经失效的历史记录重复改写。同一时间段内不能有空档，也不能重叠——这是省集中版本目录的基本要求。</p>
+  <p>例：新批次 <code>2026-10-25</code> 生效，旧记录的 <code>ENDDATE</code> 写成 <code>2026-10-24</code>；新记录的 <code>ENDDATE</code> 为 <code>NULL</code>，表示当前有效。</p>
+  <p>关旧时一般带上 <code>ENDDATE IS NULL OR ENDDATE &gt;= B.BEGNDATE</code>，避免把已经失效的历史记录重复改写。</p>
 
   <h2>首次运行</h2>
   <ul>
@@ -153,11 +149,10 @@
 
   <h2>术语</h2>
   <ul>
-    <li><b>三目</b>：药品、诊疗项目、医用耗材三类目录</li>
-    <li><b>批次表</b>：带 <code>_update_2107</code> 后缀的表，存放本次待更新数据</li>
-    <li><b>目标表</b>：正式目录表，更新后生效的地方</li>
-    <li><b>统筹区</b>：<code>POOLAREA_NO</code>，示例地区为 <code>000000</code></li>
-    <li><b>CRTER_ID</b>：生成这批数据时的版本号，用来核对跑的是哪一批</li>
+    <li><b>批次表</b>：本次待更新的数据表，通常带 <code>_update_</code> 之类的后缀</li>
+    <li><b>目标表</b>：线上正式表，更新后生效的地方</li>
+    <li><b>版本字段</b>：一般用 <code>CRTER_ID</code> 这类字段标识批次，可在脚本设置里改</li>
+    <li><b>分区/归属字段</b>：如 <code>POOLAREA_NO</code>，具体叫什么由你的业务决定</li>
   </ul>
 
   <div class="warn">

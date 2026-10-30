@@ -22,7 +22,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -4061,22 +4060,16 @@ var (
 	updCache map[string]any
 )
 
-// 升级源地址：老安装里存的是 dl.example.com，统一改指对象存储；
-// 没配过的也走这个默认值，不再「静默不检查更新」。
-const (
-	legacyUpdateURL  = "dl.example.com"
-	defaultUpdateURL = "https://oss-api.example.com/medupdate-tool/"
-)
+// 升级源地址。开源版默认留空＝不检查更新，避免把私有分发地址写进仓库；
+// 自建分发时用构建参数注入：-X main.defaultUpdateURL=https://你的地址/
+var defaultUpdateURL = ""
 
+// effectiveUpdateURL: 设置里填了就用它；没填则用构建时注入的默认值（开源版为空＝不检查更新）
 func effectiveUpdateURL(raw string) string {
-	u := strings.TrimSpace(raw)
-	if u == "" {
-		return defaultUpdateURL
+	if u := strings.TrimSpace(raw); u != "" {
+		return u
 	}
-	if p, err := url.Parse(u); err == nil && strings.EqualFold(p.Hostname(), legacyUpdateURL) {
-		return defaultUpdateURL
-	}
-	return u
+	return defaultUpdateURL
 }
 
 func fetchVersion(base string, fresh bool) (map[string]any, error) {
@@ -4724,7 +4717,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if tbl == "" {
-			tbl = "hilist_b"
+			writeJSON(w, 400, map[string]any{"ok": false, "error": "需要指定表名：/api/inspect?table=表名"})
+			return
 		}
 		db, err := openDB(ds)
 		if err != nil {
@@ -4816,6 +4810,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		st := loadStore()
 		mu.Unlock()
 		base := effectiveUpdateURL(st.Settings.UpdateURL)
+		if base == "" {
+			writeJSON(w, 200, map[string]any{"enabled": false, "reason": "未配置升级源"})
+			return
+		}
 		if !strings.HasSuffix(base, "/") {
 			base += "/"
 		}

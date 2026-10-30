@@ -79,11 +79,11 @@ func mkStore() Store {
 	on := true
 	return Store{
 		DataSources: []DataSource{
-			{ID: "d1", Name: "政策中心", Host: "127.0.0.1", Port: 3306, Database: "demo_db", Pass: "p1"},
+			{ID: "d1", Name: "测试库", Host: "127.0.0.1", Port: 3306, Database: "demo_db", Pass: "p1"},
 			{ID: "d2", Name: "备用库", Host: "127.0.0.2", Port: 3306, Database: "other_db", Pass: "p2"},
 		},
 		Groups: []Group{
-			{ID: "g1", DSID: "d1", Name: "示例地区", Order: 1},
+			{ID: "g1", DSID: "d1", Name: "分组A", Order: 1},
 			{ID: "g2", DSID: "", ParentID: "g1", Name: "子文件夹", Order: 1},
 		},
 		Scripts: []Script{
@@ -163,7 +163,7 @@ func TestPlanImportRemap(t *testing.T) {
 	b, _ := buildExport(cur, "all", "", true)
 	// 造一份"来自另一台机器"的导出：ID 全不同，连接指向同一个库
 	b.DataSources[0].ID = "X1"
-	b.DataSources[0].Name = "政策中心"
+	b.DataSources[0].Name = "测试库"
 	b.Groups[0].ID = "G1"
 	b.Groups[0].DSID = "X1"
 	b.Groups[1].ID = "G2"
@@ -208,7 +208,7 @@ func TestPlanImportRemap(t *testing.T) {
 	}
 	// 引用关系必须重建：脚本挂到新文件夹，新文件夹挂到新连接
 	for _, g := range out.Groups {
-		if g.Name == "示例地区" {
+		if g.Name == "分组A" {
 			if g.DSID != "d1" {
 				t.Fatalf("顶层文件夹的连接没对上: %q", g.DSID)
 			}
@@ -255,7 +255,7 @@ func TestPlanImportNeedsPassword(t *testing.T) {
 	_ = out
 	found := false
 	for _, n := range sum.NeedPassword {
-		if n == "政策中心" {
+		if n == "测试库" {
 			found = true
 		}
 	}
@@ -426,7 +426,7 @@ func TestImportGroupDSSConflict(t *testing.T) {
 	if sum.AddedDS != 1 {
 		t.Fatalf("新库应该新增 1 个连接，实际 %d", sum.AddedDS)
 	}
-	// 顶层应该有两个「示例地区」：原来绑 d1 的，和新的绑新连接的
+	// 顶层应该有两个「分组A」：原来绑 d1 的，和新的绑新连接的
 	var tops []Group
 	for _, g := range out.Groups {
 		if g.ParentID == "" && g.Name != "" {
@@ -440,12 +440,12 @@ func TestImportGroupDSSConflict(t *testing.T) {
 	for _, g := range tops {
 		names[g.Name] = true
 	}
-	if !names["示例地区"] || !names["示例地区 (2)"] {
+	if !names["分组A"] || !names["分组A (2)"] {
 		t.Fatalf("同绑不同库的文件夹应该加后缀，实际 %+v", names)
 	}
 	// 原文件夹必须保持绑 d1
 	for _, g := range tops {
-		if g.Name == "示例地区" && g.DSID != "d1" {
+		if g.Name == "分组A" && g.DSID != "d1" {
 			t.Fatalf("原文件夹的连接被改了: %q", g.DSID)
 		}
 	}
@@ -548,7 +548,7 @@ func TestImportDSConflictIdempotent(t *testing.T) {
 // 本地文件夹没绑库时，不能被导入的连接填进去——否则该文件夹下原本无库的脚本会跑到导入的库上
 func TestImportDoesNotFillExistingGroupDS(t *testing.T) {
 	cur := mkStore()
-	cur.Groups[0].DSID = "" // 本地「示例地区」没绑库，但里面有脚本 s2
+	cur.Groups[0].DSID = "" // 本地「分组A」没绑库，但里面有脚本 s2
 
 	b, _ := buildExport(cur, "all", "", true)
 	b.Groups[0].DSID = "d2" // 导入的绑 d2

@@ -85,13 +85,21 @@ func TestHostAllowList(t *testing.T) {
 	}
 }
 
-// 老的 dl 地址必须自动改指对象存储；没配过也用默认值（不再静默不检查更新）
+// 开源版默认不检查更新；构建时注入地址后，老域名统一改指新地址
+func TestEffectiveUpdateURLLegacy(t *testing.T) {
+	old := defaultUpdateURL
+	defaultUpdateURL = "https://example.com/updates/"
+	defer func() { defaultUpdateURL = old }()
+	for _, in := range []string{"", "  "} {
+		if got := effectiveUpdateURL(in); got != defaultUpdateURL {
+			t.Fatalf("%q → %q，期望 %q", in, got, defaultUpdateURL)
+		}
+	}
+}
 func TestEffectiveUpdateURL(t *testing.T) {
 	cases := map[string]string{
-		"":                                  defaultUpdateURL,
-		"https://dl.example.com/":           defaultUpdateURL,
-		"http://dl.example.com":             defaultUpdateURL,
-		"https://oss-api.example.com/x/":    "https://oss-api.example.com/x/",
+		"":                                  "",
+		"  ":                                "",
 		"https://self.example.com/updates/": "https://self.example.com/updates/",
 	}
 	for in, want := range cases {

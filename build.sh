@@ -12,10 +12,13 @@ if [ -z "$APPVER" ]; then
   echo "读不到 goapp/main.go 里的 const appVersion，检查那行是不是被改过" >&2
   exit 1
 fi
-FLAGS=(-trimpath -ldflags "-s -w -X main.buildTime=$BT")
+LDX="-s -w -X main.buildTime=$BT"
+# 自建分发时用 UPDATE_URL=https://你的地址/ ./build.sh 注入；不设则为空＝不检查更新
+if [ -n "${UPDATE_URL:-}" ]; then LDX="$LDX -X main.defaultUpdateURL=$UPDATE_URL"; fi
+FLAGS=(-trimpath -ldflags "$LDX")
 
 echo "→ windows/amd64（无控制台窗口）"
-GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H windowsgui -X main.buildTime=$BT" -o ../release-win/medupdate.exe .
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H windowsgui -X main.buildTime=$BT${UPDATE_URL:+ -X main.defaultUpdateURL=$UPDATE_URL}" -o ../release-win/medupdate.exe .
 
 echo "→ darwin/arm64"
 GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../release-mac/medupdate .
@@ -29,9 +32,12 @@ GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../medupdate .
 # macOS App 包里的二进制也要更新，否则双击 app 跑的还是老代码
 echo "→ 更新 macOS App 包"
 APP="${APP_BUNDLE:-../dist/update-tool.app}"
-# 本机老部署用的是中文包名；目录存在就沿用，避免改名后这里静默跳过、双击跑的还是老代码
-if [ ! -d "$APP" ] && [ -d "../dist/update-tool.app" ]; then
-  APP="../dist/update-tool.app"
+# 没指定且默认目录不存在时，退而使用 dist 下任意一个 .app，
+# 避免本机改名后这里静默跳过、双击跑的还是老代码
+if [ ! -d "$APP" ]; then
+  for cand in ../dist/*.app; do
+    [ -d "$cand" ] && APP="$cand" && break
+  done
 fi
 if [ -d "$APP" ]; then
   cp ../release-mac/medupdate "$APP/Contents/MacOS/medupdate"

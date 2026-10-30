@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"database/sql/driver"
 	"embed"
@@ -1252,10 +1253,67 @@ func tblSchemaOf(defSchema, raw string) (string, string) {
 	return defSchema, raw
 }
 
+// splitSetAssignments 按顶层逗号切 SET 的赋值列表，跳过引号和括号里的逗号。
+// 用 strings.Split 会把 'a, b' 这种字符串值切断，误判出额外的写入表。
+func splitSetAssignments(s string) []string {
+	var out []string
+	var cur strings.Builder
+	inS, inD, inBt := false, false, false
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inS:
+			if c == '\\' && i+1 < len(s) {
+				cur.WriteByte(c)
+				i++
+				cur.WriteByte(s[i])
+				continue
+			}
+			if c == '\'' {
+				inS = false
+			}
+		case inD:
+			if c == '\\' && i+1 < len(s) {
+				cur.WriteByte(c)
+				i++
+				cur.WriteByte(s[i])
+				continue
+			}
+			if c == '"' {
+				inD = false
+			}
+		case inBt:
+			if c == '`' {
+				inBt = false
+			}
+		case c == '\'':
+			inS = true
+		case c == '"':
+			inD = true
+		case c == '`':
+			inBt = true
+		case c == '(':
+			depth++
+		case c == ')':
+			if depth > 0 {
+				depth--
+			}
+		case c == ',' && depth == 0:
+			out = append(out, cur.String())
+			cur.Reset()
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	out = append(out, cur.String())
+	return out
+}
+
 func updateWriteTables(tablesPart, setPart string) []string {
 	type ent struct{ raw, alias string }
 	ents := make([]ent, 0, 2)
-	for _, part := range splitTopLevel(tablesPart) {
+	for _, part := range updateTableParts(tablesPart) {
 		fs := strings.Fields(strings.TrimSpace(part))
 		if len(fs) == 0 {
 			continue
@@ -1279,7 +1337,7 @@ func updateWriteTables(tablesPart, setPart string) []string {
 		seen[raw] = true
 		out = append(out, raw)
 	}
-	for _, asg := range splitTopLevel(setPart) {
+	for _, asg := range splitSetAssignments(setPart) {
 		lhs := asg
 		if i := strings.Index(asg, "="); i >= 0 {
 			lhs = asg[:i]
@@ -1590,7 +1648,12 @@ func qualTable(schema, table string) string {
 // 唯一键：优先主键；没有主键就用“所有列都 NOT NULL”的唯一索引（唯一索引允许多个 NULL，不能用来判重）
 // 元数据查询入口，测试里可替换以模拟「中间件限制 information_schema」
 var infQuery = func(db *sql.DB, q string, args ...any) (*sql.Rows, error) {
-	return db.Query(q, args...)
+	// 元数据查询也要有上限：对端一次长 ALTER 持着 MDL 就能把预检卡到连接读超时。
+	// Rows 返回后还要继续读，所以不能在这里 cancel；交给 20 秒计时器到点释放。
+	// shortcut: 每次查询多挂一个 20 秒计时器；元数据查询次数很少，可接受。
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	time.AfterFunc(20*time.Second, cancel)
+	return db.QueryContext(ctx, q, args...)
 }
 
 /* ---------------- 预检元数据缓存 ---------------- */
@@ -4781,13 +4844,11 @@ func findUnsafeStatement(stmts []string) (int, string, bool) {
 		if kind == "update" {
 			// 多表 UPDATE 用 JOIN ... ON 限定行，没有顶层 WHERE 不等于整表改写。
 			// 只看 SET 之前的表段：子查询里的 JOIN 不代表这行有范围限制。
+			// JOIN 不算「有范围限制」：JOIN 只是把别的表拉进来做条件，
+			// 没有 WHERE 时目标表仍然是整表改。预检那边也是这么判的，
+			// 两边口径必须一致，否则关掉预检就漏了最后一道保护。
 			limited := false
-			if tablesPart, _, okUpd := splitUpdate(plain); okUpd {
-				if j, _ := indexTopLevelWord(strings.ToUpper(stripSQLComments(tablesPart)), "join"); j >= 0 {
-					limited = true
-				}
-			}
-			if !limited && deleteLimit(plain) > 0 {
+			if deleteLimit(plain) > 0 {
 				limited = true
 			}
 			if whereTail(plain) == "" && !limited {
@@ -6445,7 +6506,8 @@ func main() {
 			if given == "" {
 				given = r.Header.Get("x-key")
 			}
-			if given != key {
+			// 定长比较：避免逐字节计时把密钥试出来
+			if subtle.ConstantTimeCompare([]byte(given), []byte(key)) != 1 {
 				w.WriteHeader(401)
 				_, _ = w.Write([]byte("401 需要访问密钥，请在地址后加 ?k=你的密钥"))
 				return

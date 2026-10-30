@@ -2554,7 +2554,7 @@ function renderCheck(r) {
     const p = PREVIEWS[x.i] || '';
     let body = p ? `<div class="sqlprev">${esc(p)}</div>` : '';
     if (!x.ok) body += `<div class="errbox">${esc(x.error || '')}</div>`;
-    const sum = x.ok ? (x.skipped ? '跳过（DDL）' : '语法通过') : '语法错误';
+    const sum = x.ok ? (x.skipped ? (x.note || '已跳过') : '语法通过') : '语法错误';
     html += blockHTML(x.i, x.ok ? 'ok' : 'err', '语句 ' + (x.i + 1), sum, body);
   }
   $('res').innerHTML = html;

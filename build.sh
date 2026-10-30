@@ -15,10 +15,12 @@ fi
 LDX="-s -w -X main.buildTime=$BT"
 # 自建分发时用 UPDATE_URL=https://你的地址/ ./build.sh 注入；不设则为空＝不检查更新
 if [ -n "${UPDATE_URL:-}" ]; then LDX="$LDX -X main.defaultUpdateURL=$UPDATE_URL"; fi
+# 内网发行版可以把默认显示名注入成中文，开源版不设就保持 update-tool
+if [ -n "${APP_NAME:-}" ]; then LDX="$LDX -X main.defaultAppName=$APP_NAME"; fi
 FLAGS=(-trimpath -ldflags "$LDX")
 
 echo "→ windows/amd64（无控制台窗口）"
-GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H windowsgui -X main.buildTime=$BT${UPDATE_URL:+ -X main.defaultUpdateURL=$UPDATE_URL}" -o ../release-win/update-tool.exe .
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H windowsgui -X main.buildTime=$BT${UPDATE_URL:+ -X main.defaultUpdateURL=$UPDATE_URL}${APP_NAME:+ -X main.defaultAppName=$APP_NAME}" -o ../release-win/update-tool.exe .
 
 echo "→ darwin/arm64"
 GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../release-mac/update-tool .

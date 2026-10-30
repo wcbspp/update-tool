@@ -179,7 +179,9 @@ type Store struct {
 }
 
 // 默认名字。开源版本改这一处即可换成中性名称，界面、日志、启动横幅都跟着变。
-const defaultAppName = "update-tool"
+// 内置默认名。开源版固定 update-tool；发行版构建时用
+// -X main.defaultAppName=自定义名字 注入，不要把具体名字写进仓库。
+var defaultAppName = "update-tool"
 
 // appNameOf: 优先用设置里的名字，其次环境变量 APP_NAME，最后回落到内置默认。
 // 名字只用于展示，长度限死避免撑坏顶栏。

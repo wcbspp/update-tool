@@ -14,7 +14,17 @@ for f in $(git diff --cached --name-only --diff-filter=ACM); do
   esac
 done
 
-# 2) 内容检查（词表存在才做）
+# 2) 拒绝大文件：编译产物、打包文件不该进仓库
+for f in $(git diff --cached --name-only --diff-filter=ACM); do
+  [ -f "$f" ] || continue
+  sz=$(wc -c < "$f" | tr -d ' ')
+  if [ "$sz" -gt 1048576 ]; then
+    echo "✗ 文件过大（$((sz/1024)) KB）：$f —— 编译产物不要入库"
+    fail=1
+  fi
+done
+
+# 3) 内容检查（词表存在才做）
 if [ -f .githooks/.blocklist ]; then
   hits=$(git diff --cached -U0 -- . ':!.githooks' \
     | grep -E '^\+' \

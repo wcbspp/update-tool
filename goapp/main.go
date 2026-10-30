@@ -898,7 +898,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.1.1"
+const appVersion = "1.1.2"
 
 type cell = any
 

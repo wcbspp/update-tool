@@ -8,6 +8,8 @@ release-*/
 dist/
 build/
 medupdate
+update-tool
+update-tool.exe
 goapp/sqlconsole
 *.exe
 *.zip

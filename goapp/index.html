@@ -739,11 +739,13 @@
 
   .ssum{font-size:12px;color:#a9b8cc;overflow:hidden;line-height:1.55;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;white-space:normal;}
 
-  .ssum .sum.ok{color:#7ee2a0;}
+  .ssum .sum{color:#a9b8cc;}
 
-  .ssum .sum.warn{color:#f0c070;}
+  .ssum .mk.ok{color:#7ee2a0;}
 
-  .ssum .sum.err{color:#ff8f8f;font-weight:600;}
+  .ssum .mk.warn{color:#f0c070;}
+
+  .ssum .mk.err{color:#ff8f8f;font-weight:700;}
 
   .ssum .sum.more{color:#6b7789;}
 
@@ -2832,9 +2834,9 @@ function stmtSummary(cs) {
     return t;
   };
   const bits = cs.slice(0, 8).map(c =>
-    `<span class="sum ${cls(c.level)}">${esc(mark(c.level) + label(c))}</span>`);
+    `<span class="sum"><span class="mk ${cls(c.level)}">${mark(c.level).trim()}</span> ${esc(label(c))}</span>`);
   if (cs.length > 8) bits.push(`<span class="sum more">…还有 ${cs.length - 8} 项</span>`);
-  return bits.join('<span class="sumsep">·</span>') || '<span class="sum ok">✓ 通过</span>';
+  return bits.join('<span class="sumsep">·</span>') || '<span class="sum"><span class="mk ok">✓</span> 通过</span>';
 }
 
 function blockHTML(stmt, level, title, summary, body) {

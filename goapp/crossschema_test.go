@@ -122,3 +122,29 @@ func TestWriteTargetRefsMultiTableBothWritten(t *testing.T) {
 		}
 	}
 }
+
+// autocommit 是能绕过 COMMIT/ROLLBACK 拦截的写法：
+// SET SESSION / SET @@ 前缀都对不上，必须在语句扫描阶段整类拒绝。
+func TestFindAutocommitStmt(t *testing.T) {
+	bad := []string{
+		"SET SESSION autocommit = 0",
+		"SET @@autocommit = 1",
+		"SET autocommit=1",
+		"set session AUTOCOMMIT = 1",
+	}
+	for _, s := range bad {
+		if len(findAutocommitStmt([]string{s})) != 1 {
+			t.Fatalf("应识别为改 autocommit：%q", s)
+		}
+	}
+	ok := []string{
+		"UPDATE t SET v = 1 WHERE id = 1",
+		"SELECT 'autocommit' AS x",
+		"INSERT INTO t VALUES (1)",
+	}
+	for _, s := range ok {
+		if len(findAutocommitStmt([]string{s})) != 0 {
+			t.Fatalf("不应拦截：%q", s)
+		}
+	}
+}

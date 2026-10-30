@@ -2598,7 +2598,14 @@ async function run() {
     const envBanner = (CUR_ENV === 'prod')
       ? '<div style="margin-bottom:10px;padding:8px 10px;border-radius:6px;background:#2a1216;border:1px solid #5d2a30;color:#ffb0b6;font-size:12px">⚠ 这是<b>生产库</b>，执行后立即生效，确认无误再继续。</div>'
       : '';
-    const body = envBanner + versionsHTML((pf && pf.versions) || []) +
+    // 预检超时/未覆盖的条目在结果区里，但用户点「执行」时看不到结果区，
+    // 必须在确认框里点出来，否则 90 秒闸门等于没有。
+    const pchecks = (pf && pf.checks) || [];
+    const uncheckedN = pchecks.filter(c => /未核对|未覆盖/.test(String(c.title || ''))).length;
+    const uncheckedLine = uncheckedN > 0
+      ? `<div style="margin-top:8px;padding:7px 9px;border-radius:6px;background:#2a2113;border:1px solid #5d4a22;color:#e0a33a;font-size:12px">⚠ 有 ${uncheckedN} 项没有核对（预检超时或工具暂时不支持），执行前请自行确认这些语句的影响范围。</div>`
+      : '';
+    const body = envBanner + versionsHTML((pf && pf.versions) || []) + uncheckedLine +
       `<div style="margin-top:12px;font-size:12px;color:#9aa6b8;line-height:1.8">
          目标：${esc($('crumb').textContent)}<br>
          ${sel ? '仅执行选中部分' : '执行全部'} · ${(pf && pf.count) || 0} 条语句
@@ -3363,7 +3370,6 @@ async function openLogs() {
     <div style="display:flex;gap:6px;margin-bottom:8px" id="logbtns">
       ${['', 'true', 'false'].map(v => `<button class="sm" data-f="ok" data-v="${v}" onclick="setFilter('ok','${v}')">${v === '' ? '全部' : v === 'true' ? '仅成功' : '仅失败'}</button>`).join('')}
       <span style="width:10px"></span>
-      ${['', 'true', 'false'].map(v => `<button class="sm" data-f="dry" data-v="${v}" onclick="setFilter('dry','${v}')">${v === '' ? '全部模式' : v === 'true' ? '仅预演' : '仅执行'}</button>`).join('')}
     </div>
     <div class="lwrap" id="lwrap"><div style="padding:14px;color:#65707f;font-size:12px">加载中…</div></div>`;
   $('logmask').classList.add('on');
@@ -3401,7 +3407,7 @@ function renderLogs() {
       : l.type === 'check' ? '语法校验'
       : l.type === 'import' ? '导入'
       : l.type === 'export' ? '导出'
-      : (l.dryRun ? '预演' : '执行');
+      : '执行';
     return `<div class="lrow" onclick="toggleLog(${i})">
         <span class="t">${time}</span>
         <span class="s" title="${esc(l.script || '')}">${esc(l.script || '-')}</span>
@@ -3428,7 +3434,7 @@ function logDetail(l) {
     lines.push(`时间：${l.ts}    模式：语法校验    耗时：${l.ms}ms    语句：${l.stmts} 条`);
     lines.push(`校验范围：${l.selOnly ? '仅选中片段' : '整段'}    结果：${l.ok ? '通过' : '有问题'}`);
   } else {
-    lines.push(`时间：${l.ts}    模式：${l.dryRun ? '预演' : '执行'}    耗时：${l.ms}ms    语句：${l.stmts} 条`);
+    lines.push(`时间：${l.ts}    耗时    耗时：${l.ms}ms    语句：${l.stmts} 条`);
     lines.push(`影响行数：${l.affected || 0}    数据版本：${logVersion(l) || '-'}`);
   }
   if (l.type === 'preflight') lines.push(`类型：预检（只读）    错误 ${l.errCount || 0} 项    提醒 ${l.warnCount || 0} 项`);

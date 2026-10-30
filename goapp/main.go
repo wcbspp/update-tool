@@ -835,6 +835,23 @@ func firstDMLIsSelect(s string) bool {
 	return true
 }
 
+// autocommit 能被写成 SET SESSION / SET @@ / SET GLOBAL 多种形式，
+// 逐种前缀匹配一定会漏；命中就直接拒绝，因为没有它事务语义就不成立。
+var reAutocommit = regexp.MustCompile(`(?i)\bautocommit\b`)
+
+// findAutocommitStmt 找出试图改变 autocommit 的语句（只在 SET 语句里找，
+// 避免把字符串字面量里的 autocommit 也算进来）。
+func findAutocommitStmt(stmts []string) []int {
+	out := make([]int, 0, 1)
+	for i, st := range stmts {
+		t := strings.ToUpper(strings.TrimSpace(stripSQLComments(st)))
+		if strings.HasPrefix(t, "SET") && reAutocommit.MatchString(st) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 func isSetStmt(s string) bool {
 	t := strings.ToUpper(strings.TrimSpace(stripSQLComments(s)))
 	return t == "SET" || strings.HasPrefix(t, "SET ")
@@ -891,17 +908,6 @@ func preview(s string) string {
 
 var sessWarnOnce sync.Once
 var sessLockWarnOnce sync.Once
-
-// dsPfSec 把数据源里的预检查询超时换算成秒：-1=不限（返回 0），0=默认 20，其余原样。
-func dsPfSec(d DataSource) int {
-	switch {
-	case d.PFSec == -1:
-		return 0
-	case d.PFSec > 0:
-		return d.PFSec
-	}
-	return 20
-}
 
 // sessInitConnector：每条新连接建好后设置 SELECT 超时（5.7.8 以下/代理不支持时忽略错误）
 type sessInitConnector struct {
@@ -1013,7 +1019,6 @@ func scanRows(rows *sql.Rows) ([]string, [][]cell, bool, error) {
 
 type stmtResult struct {
 	Affected  int64    `json:"affected"`
-	Info      string   `json:"info,omitempty"`
 	Columns   []string `json:"columns,omitempty"`
 	Rows      [][]cell `json:"rows"`
 	Truncated bool     `json:"truncated,omitempty"`
@@ -1102,7 +1107,7 @@ func runStatements(ds DataSource, stmts []string) (map[string]stmtResult, int, s
 	_, _ = db.Exec("SET SESSION max_execution_time = 0")
 
 	// 非事务引擎上 rollback 什么也回滚不了。算一次，失败时如实告诉用户哪些表改不回来。
-	badEng := nonTransactionalTables(db, writeTargetRefs(stmts, ds.Database), dsPfSec(ds))
+	badEng := nonTransactionalTables(db, writeTargetRefs(stmts, ds.Database), dsPFSec(ds))
 
 	// 超时按「每条语句」算：整段共用一个上下文时，一条慢语句会把
 	// 前面已经成功的语句一起拖到超时，用户看到的是整批回滚。
@@ -1230,6 +1235,23 @@ func checkStatements(ds DataSource, stmts []string) ([]map[string]any, bool) {
 // updateWriteTables 找出 UPDATE 真正写入的表：只有 SET 左边的别名算数。
 // 逗号列表里只读参与的关联表（比如维度表）不算写入目标，
 // 否则会把它当成「非事务引擎、改动无法回滚」误报出来。
+// firstIdent 取表段里第一个标识符（可能带库名），保留反引号外的原样文本
+func firstIdent(part string) string {
+	fs := strings.Fields(strings.TrimSpace(part))
+	if len(fs) == 0 {
+		return ""
+	}
+	return strings.Trim(fs[0], "`\"")
+}
+
+// tblSchemaOf 解析「库.表」写法：带库名就用它，否则用数据源的库
+func tblSchemaOf(defSchema, raw string) (string, string) {
+	if s, n, ok := splitSchemaQualified(raw); ok {
+		return s, n
+	}
+	return defSchema, raw
+}
+
 func updateWriteTables(tablesPart, setPart string) []string {
 	type ent struct{ raw, alias string }
 	ents := make([]ent, 0, 2)
@@ -3919,7 +3941,14 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					if ctes[strings.ToLower(trimIdent(t))] {
 						continue // CTE 不是真实表
 					}
-					refs = append(refs, tblRef{mResolveTable(db, schema, t), a})
+					// 跨库写法 otherdb.t 必须按它自己的库去查引擎，
+					// 否则会拿当前库的同名表做判断，非事务引擎就漏报了
+					sch, nm := tblSchemaOf(schema, firstIdent(part))
+					real := mResolveTable(db, sch, normTable(nm))
+					refs = append(refs, tblRef{real, a})
+					if !strings.EqualFold(sch, schema) {
+						noteWrite(sch, real)
+					}
 				}
 			}
 			if len(refs) < 2 {
@@ -4043,8 +4072,14 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				if m == nil {
 					continue
 				}
-				targets = append(targets, mResolveTable(db, schema, normTable(m[1])))
-				countTable = targets[0]
+				// 跨库写法要按它自己的库解析，否则引擎检查会查当前库的同名表
+				sch, nm := tblSchemaOf(schema, m[1])
+				real := mResolveTable(db, sch, normTable(nm))
+				targets = append(targets, real)
+				countTable = real
+				if !strings.EqualFold(sch, schema) {
+					noteWrite(sch, real)
+				}
 			case reDeleteMulti.MatchString(st):
 				mm := reDeleteMulti.FindStringSubmatch(st)
 				if strings.Contains(mm[1], "(") {
@@ -5935,7 +5970,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			appendLog(map[string]any{
 				"ts": time.Now().Format(time.RFC3339), "type": "preflight",
 				"script": sc.Name, "ds": ds.Name, "database": ds.Database,
-				"dryRun": false, "stmts": len(stmts), "ok": false,
+				"stmts": len(stmts), "ok": false,
 				"ms": time.Since(pfStart).Milliseconds(), "failedAt": -1, "error": errShort,
 			})
 			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error(), "checks": []map[string]any{}, "versions": []map[string]any{}})
@@ -5960,7 +5995,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		appendLog(map[string]any{
 			"ts": time.Now().Format(time.RFC3339), "type": "preflight",
 			"script": sc.Name, "ds": ds.Name, "database": ds.Database,
-			"dryRun": false, "stmts": len(stmts), "ok": !hasErr,
+			"stmts": len(stmts), "ok": !hasErr,
 			"ms": time.Since(pfStart).Milliseconds(), "failedAt": -1,
 			"errCount": errN, "warnCount": warnN,
 		})
@@ -6033,7 +6068,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		_ = appendLog(map[string]any{
 			"ts": time.Now().Format(time.RFC3339), "type": "check",
 			"script": sc.Name, "ds": ds.Name, "database": ds.Database,
-			"dryRun": false, "stmts": len(stmts), "ok": allOK,
+			"stmts": len(stmts), "ok": allOK,
 			"ms": time.Since(chkStart).Milliseconds(), "failedAt": failedAt,
 			"error": firstErr, "selOnly": b.SelOnly,
 		})
@@ -6052,9 +6087,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			ScriptID string           `json:"scriptId"`
 			SQL      string           `json:"sql"`
 			Versions []map[string]any `json:"versions"`
+			DryRun   *bool            `json:"dryRun"` // 预演已移除；旧页面还发就拒绝，不能静默真执行
 		}
 		if err := readJSON(r, &b); err != nil {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if b.DryRun != nil {
+			writeJSON(w, 409, map[string]any{"ok": false,
+				"error": "预演功能已移除，当前页面是旧的。请刷新页面（Ctrl/Cmd+Shift+R）后再执行"})
 			return
 		}
 		mu.Lock()
@@ -6090,7 +6131,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 事务由工具统一管理：脚本里自带 COMMIT/ROLLBACK 会破坏「失败整体回滚」
-		var txnIdx, ddlIdx, useIdx []int
+		var txnIdx, ddlIdx, useIdx, autoIdx []int
 		for i, st := range stmts {
 			if isTxnControl(st) {
 				txnIdx = append(txnIdx, i)
@@ -6100,6 +6141,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			}
 			if isUseStmt(st) {
 				useIdx = append(useIdx, i)
+			}
+			if isAuto := findAutocommitStmt([]string{st}); len(isAuto) > 0 {
+				autoIdx = append(autoIdx, i)
 			}
 		}
 		if len(txnIdx) > 0 {
@@ -6115,6 +6159,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if len(useIdx) > 0 {
 			writeJSON(w, 400, map[string]any{"ok": false,
 				"error": "第 " + idxList(useIdx) + " 条是 USE 语句，会切换当前库，让预检看的表与实际写入的表不是同一张。工具不支持 USE：跨库请写全 库.表，或直接改数据源里的库名"})
+			return
+		}
+		if len(autoIdx) > 0 {
+			writeJSON(w, 400, map[string]any{"ok": false,
+				"error": "第 " + idxList(autoIdx) + " 条在改 autocommit。事务由工具管理，改了它前面的语句会当场提交，「失败整体回滚」就不成立了。请删掉这条语句"})
 			return
 		}
 
@@ -6139,7 +6188,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		appendLog(map[string]any{
 			"ts": time.Now().Format(time.RFC3339), "script": sc.Name, "ds": ds.Name,
-			"dryRun": false, "stmts": len(stmts), "database": ds.Database,
+			"stmts": len(stmts), "database": ds.Database,
 			"ok": okRun, "ms": ms, "failedAt": failedAt, "error": errShort,
 			"previews": logPreviews, "affected": totalAffected, "versions": b.Versions,
 		})
@@ -6155,8 +6204,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				limit = n
 			}
 		}
-		wantOK := r.URL.Query().Get("ok")   // "" | true | false
-		wantDry := r.URL.Query().Get("dry") // "" | true | false
+		wantOK := r.URL.Query().Get("ok") // "" | true | false
 		var logs []map[string]any
 		b, err := readLogTail(2 << 20)
 		if err == nil {
@@ -6171,11 +6219,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				}
 				if wantOK != "" {
 					if v, ok := m["ok"].(bool); !ok || v != (wantOK == "true") {
-						continue
-					}
-				}
-				if wantDry != "" {
-					if v, ok := m["dryRun"].(bool); !ok || v != (wantDry == "true") {
 						continue
 					}
 				}

@@ -906,6 +906,9 @@ func preview(s string) string {
 
 /* ---------------- 数据库 ---------------- */
 
+// errPreflightTimeout 表示「整场预检的时间用完了」，不是查询本身出错
+var errPreflightTimeout = errors.New("预检超时")
+
 var sessWarnOnce sync.Once
 var sessLockWarnOnce sync.Once
 
@@ -3925,6 +3928,10 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					durDup = time.Since(t0)
 				})
 				tasks = append(tasks, func(c *sql.DB) {
+					if time.Now().After(deadline) {
+						confErr = errPreflightTimeout
+						return
+					}
 					t0 := time.Now()
 					conf, confTrunc, confErr = conflictCountPairs(c, target, src, pairs, 1000, pfSec)
 					durConf = time.Since(t0)
@@ -4280,6 +4287,12 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 				rt := r.table
 				tasks = append(tasks, func(c *sql.DB) {
+					if time.Now().After(deadline) {
+						mu.Lock()
+						m[rt] = cntRes{err: errPreflightTimeout}
+						mu.Unlock()
+						return
+					}
 					t0 := time.Now()
 					n, capped, cerr := tableCountBounded(c, rt, 300000, pfSec)
 					mu.Lock()
@@ -4348,6 +4361,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			k := k
 			pp := delPending[k]
 			tasks[k] = func(c *sql.DB) {
+				// 并发段在逐条循环之后跑，光靠循环里的 deadline 检查管不到
+				if time.Now().After(deadline) {
+					res[k].err = errPreflightTimeout
+					return
+				}
 				t0 := time.Now()
 				sch := pp.schema
 				if sch == "" {

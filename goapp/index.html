@@ -2733,11 +2733,14 @@ function openResultWindow() {
     + 'body{padding:16px;}'
     + '.res{height:auto!important;overflow:visible!important;}'
     + '.lwrap{max-height:none!important;}'
-    // 明细全部展开显示（预检行是 .chk、校验行是 .sblock，统一用全局选择器）
+    // 明细全部展开：.sbody 默认 display:none，必须强制显示；.chk-d 也不再省略
+    + '.sblock>.sbody{display:block!important;}'
+    + '.sblock>.sbody>.chk{display:block!important;padding:7px 12px;}'
     + '.chk-d{display:block!important;white-space:pre-wrap!important;'
     + 'overflow:visible!important;text-overflow:clip!important;overflow-wrap:anywhere!important;'
     + 'max-width:none!important;line-height:1.6!important;}'
     + '.chk,.sblock{cursor:default!important;}'
+    + '.shead{pointer-events:none;}'
     + '#winbar{position:sticky;top:0;z-index:9;display:flex;gap:8px;align-items:center;'
     + 'padding:8px 12px;margin:-16px -16px 12px;background:#0b1017ee;border-bottom:1px solid #1e2836;'
     + 'font:12.5px -apple-system,"PingFang SC",sans-serif;color:#8fa3bd;}'

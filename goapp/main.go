@@ -1252,6 +1252,11 @@ var (
 	reIdentTok     = regexp.MustCompile("[A-Za-z_][A-Za-z0-9_$]*(?:\\.[A-Za-z_][A-Za-z0-9_$]*)?|,")
 )
 
+// 整场预检的总预算（秒）。单条查询有 pfSec 限制，但 20 张表串行累加
+// 仍能拖到十几分钟，这期间全局忙碌锁一直被占着，改配置全 409。
+// 90 秒是「本机不到 1 秒、DRDS 每张表几十毫秒」的几十倍余量。
+const preflightTotalSec = 90
+
 // 更新包大小上限：超过就不往盘里写，防止被巨型文件拖死
 const maxUpdateBytes = 300 << 20
 
@@ -3649,7 +3654,19 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	}
 	// 目标表定位不到的 UPDATE：把参与的表按「可能被写」检查，只给提醒不直接拦
 	unsureRefs := make([]tableRef, 0)
+	deadline := time.Now().Add(preflightTotalSec * time.Second)
 	for i, stRaw := range stmts {
+		// 超时就停下：剩下的如实标「未核对」，不报错、不阻塞执行
+		if time.Now().After(deadline) {
+			for j := i; j < len(stmts); j++ {
+				if !seen[j] {
+					seen[j] = true
+					add(j, "warn", "预检超时未核对",
+						"整场预检超过 "+strconv.Itoa(preflightTotalSec)+" 秒，这条没有核对；执行前请人工确认它的影响范围")
+				}
+			}
+			break
+		}
 		st := stripCTE(stRaw)
 		ctes := cteNames(stRaw)
 		// 服务端版本不支持这个语法时，别等执行才报错

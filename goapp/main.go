@@ -838,15 +838,28 @@ func firstDMLIsSelect(s string) bool {
 
 // autocommit 能被写成 SET SESSION / SET @@ / SET GLOBAL 多种形式，
 // 逐种前缀匹配一定会漏；命中就直接拒绝，因为没有它事务语义就不成立。
-var reAutocommit = regexp.MustCompile("(?i)^\\s*set\\s+(?:(?:session|global|local)\\s+|@@(?:session\\.|global\\.|local\\.)?)?`?autocommit`?\\s*(?::?=)")
+// autocommit 能被写成 SET@@autocommit=1、SET SESSION autocommit=1、
+// SET @x=1,@@session.autocommit=1 等多种形状，按整句前缀匹配一定会漏。
+// 这里按「赋值项」判断：切开每条 SET 的赋值，逐个看左值是不是 autocommit。
+var reAutocommitTarget = regexp.MustCompile("(?i)^`?(@@)?\\s*(?:(?:session|global|local)\\s*\\.?\\s*)?`?autocommit`?$")
 
-// findAutocommitStmt 找出试图改变 autocommit 的语句（只在 SET 语句里找，
-// 避免把字符串字面量里的 autocommit 也算进来）。
 func findAutocommitStmt(stmts []string) []int {
 	out := make([]int, 0, 1)
 	for i, st := range stmts {
-		if reAutocommit.MatchString(strings.TrimSpace(stripSQLComments(st))) {
-			out = append(out, i)
+		t := strings.TrimSpace(stripSQLComments(st))
+		if len(t) < 3 || !strings.EqualFold(t[:3], "set") {
+			continue
+		}
+		for _, asg := range splitSetAssignments(strings.TrimSpace(t[3:])) {
+			lhs := asg
+			if k := strings.Index(asg, "="); k >= 0 {
+				lhs = asg[:k]
+			}
+			lhs = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(lhs), ":"))
+			if reAutocommitTarget.MatchString(lhs) {
+				out = append(out, i)
+				break
+			}
 		}
 	}
 	return out
@@ -1317,6 +1330,14 @@ func splitSetAssignments(s string) []string {
 	}
 	out = append(out, cur.String())
 	return out
+}
+
+// tblSchemaOr 表引用没带库名时回落到数据源的库
+func tblSchemaOr(sch, def string) string {
+	if sch == "" {
+		return def
+	}
+	return sch
 }
 
 // tblKey 把「库.表」做成稳定的 map 键；schema 为空时用数据源默认库
@@ -3004,19 +3025,23 @@ func validateText(raw string) []map[string]any {
 		prevLine = cur
 	}
 
-	// 明显截断：最后一行以逗号/等号/AND/OR 结尾
-	last := ""
-	for i := len(clean) - 1; i >= 0; i-- {
-		if t := strings.TrimSpace(clean[i]); t != "" {
-			last = t
+	// 明显截断：最后一行以逗号/等号/AND/OR 结尾。
+	// 必须看原文而不是去掉字面量后的 clean：WHERE v='a' 剥掉引号内容会剩
+	// "WHERE v="，于是「写完了的语句」被判成没写完，直接挡住执行。
+	lastRaw := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			lastRaw = t
 			break
 		}
 	}
-	if last != "" {
-		low := strings.ToLower(last)
-		if strings.HasSuffix(last, ",") || strings.HasSuffix(last, "=") ||
+	endsClean := strings.HasSuffix(lastRaw, "'") || strings.HasSuffix(lastRaw, `"`) ||
+		strings.HasSuffix(lastRaw, "`") || strings.HasSuffix(lastRaw, ")")
+	if lastRaw != "" && !endsClean {
+		low := strings.ToLower(lastRaw)
+		if strings.HasSuffix(lastRaw, ",") || strings.HasSuffix(lastRaw, "=") ||
 			strings.HasSuffix(low, " and") || strings.HasSuffix(low, " or") {
-			add("error", "语句疑似不完整", "最后一行以 "+last[len(last)-1:]+" 结尾，像是没写完")
+			add("error", "语句疑似不完整", "最后一行以 "+lastRaw[len(lastRaw)-1:]+" 结尾，像是没写完")
 		}
 	}
 
@@ -4137,11 +4162,15 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			targetTable := ""
 			targetAlias := ""
 			for _, ref := range refs {
-				if updated[strings.ToLower(ref.alias)] {
+				if !updated[strings.ToLower(ref.alias)] {
+					continue
+				}
+				// 多表 UPDATE 可能同时写多张表，每张都要登记，
+				// 否则第二张表的引擎检查/重叠判断会被漏掉
+				targetUse[tblKey(ref.schema, schema, ref.table)] = append(targetUse[tblKey(ref.schema, schema, ref.table)], stmtTarget{stmt: i, where: whereRaw(st), alias: ref.alias, multi: true})
+				if targetTable == "" {
 					targetTable = ref.table
 					targetAlias = ref.alias
-					targetUse[tblKey(ref.schema, schema, ref.table)] = append(targetUse[tblKey(ref.schema, schema, ref.table)], stmtTarget{stmt: i, where: whereRaw(st), alias: targetAlias, multi: true})
-					break
 				}
 			}
 			if targetTable == "" {
@@ -4226,7 +4255,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					continue // CTE 不是真实表
 				}
 				add(i, "ok", "被删除表", tg)
-				targetUse[tg] = append(targetUse[tg], stmtTarget{stmt: i, where: where, multi: multiDelete})
+				targetUse[tblKey(countSchema, schema, tg)] = append(targetUse[tblKey(countSchema, schema, tg)], stmtTarget{stmt: i, where: where, multi: multiDelete})
 			}
 			if multi {
 				add(i, "warn", "多表 DELETE", "按关联条件删除，行数受关联结果影响，预检不做精确统计，请自行确认范围")
@@ -4906,12 +4935,15 @@ func findUnsafeStatement(stmts []string) (int, string, bool) {
 		if kind == "update" {
 			// 多表 UPDATE 用 JOIN ... ON 限定行，没有顶层 WHERE 不等于整表改写。
 			// 只看 SET 之前的表段：子查询里的 JOIN 不代表这行有范围限制。
-			// JOIN 不算「有范围限制」：JOIN 只是把别的表拉进来做条件，
-			// 没有 WHERE 时目标表仍然是整表改。预检那边也是这么判的，
-			// 两边口径必须一致，否则关掉预检就漏了最后一道保护。
+			// 与预检保持一致：JOIN 写法给 warn（范围由 ON 条件决定），不直接拦。
 			limited := false
 			if deleteLimit(plain) > 0 {
 				limited = true
+			}
+			if tablesPart, _, okUpd := splitUpdate(plain); okUpd {
+				if j, _ := indexTopLevelWord(strings.ToUpper(stripSQLComments(tablesPart)), "join"); j >= 0 {
+					limited = true
+				}
 			}
 			if whereTail(plain) == "" && !limited {
 				return idx + 1, "这条 UPDATE 没识别到 WHERE 条件；如果确实要改全表，请写成 WHERE 1=1 明确表达", true
@@ -6250,7 +6282,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		// 预检是能关的开关，这条防线必须在执行入口自己兜住
 		if idx, hint, bad := findUnsafeStatement(stmts); bad {
 			writeJSON(w, 400, map[string]any{"ok": false,
-				"error": fmt.Sprintf("第 %d 条是无条件 DELETE，会清空整张表，已拒绝执行；%s", idx, hint)})
+				"error": fmt.Sprintf("第 %d 条没有识别到 WHERE/LIMIT 范围限制，可能整表改动，已拒绝执行；%s", idx, hint)})
 			return
 		}
 		// 事务由工具统一管理：脚本里自带 COMMIT/ROLLBACK 会破坏「失败整体回滚」

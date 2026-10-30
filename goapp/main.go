@@ -1078,7 +1078,7 @@ var (
 	reDeleteMulti = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*(.+?)\s+from\s+`)
 	// 单表：DELETE [修饰词] FROM t [AS a] 后面直接是 WHERE/ORDER/LIMIT/结尾，
 	// 不能再有 from（否则是子查询，属于单表语句，不是多表 DELETE）
-	reReleaseZip   = regexp.MustCompile(`^medupdate-(win|mac|linux)-\d+\.\d+\.\d+-[0-9a-f]{6}\.zip$`)
+	reReleaseZip   = regexp.MustCompile(`^update-tool-(win|mac|linux)-\d+\.\d+\.\d+-[0-9a-f]{6}\.zip$`)
 	reDeleteMods   = regexp.MustCompile(`(?is)^\s*delete\s+(?:(?:low_priority|quick|ignore)\s+)+`)
 	reDeleteSingle = regexp.MustCompile(`(?is)^\s*delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*from\s+[\x60"]?[\w$.]+[\x60"]?\s*(?:as\s+[\x60"]?[\w$]+[\x60"]?)?\s*(?:where\b|order\s+by\b|limit\b|;?\s*$)`)
 	reDeleteUsing  = regexp.MustCompile(`(?is)^\s*delete\s+from\s+[\x60"]?([\w$.]+)[\x60"]?\s+using\s+`)
@@ -4455,13 +4455,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 下载三平台安装包（白名单，不接受任意路径）
 	if r.Method == http.MethodGet && strings.HasPrefix(p, "/dl/") {
 		files := map[string]string{
-			"medupdate.exe":   "release-win/medupdate.exe",
-			"medupdate-mac":   "release-mac/medupdate",
-			"medupdate-linux": "release-linux/medupdate",
+			"update-tool.exe":   "release-win/update-tool.exe",
+			"update-tool-mac":   "release-mac/update-tool",
+			"update-tool-linux": "release-linux/update-tool",
 		}
 		// 只放行发版脚本生成的包名（medupdate-平台-版本-6位hex.zip）。
 		// 不能整目录 glob：dist 里可能有别处打出来的包，里面带 data.json（库口令）。
-		if names, err := filepath.Glob(filepath.Join(appHome, "dist", "medupdate-*.zip")); err == nil {
+		if names, err := filepath.Glob(filepath.Join(appHome, "dist", "update-tool-*.zip")); err == nil {
 			for _, full := range names {
 				base := filepath.Base(full)
 				if !reReleaseZip.MatchString(base) {
@@ -4571,7 +4571,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{
 			"ok":       true,
-			"filename": fmt.Sprintf("medupdate-%s-%s.mhd", req.Scope, time.Now().Format("20060102-1504")),
+			"filename": fmt.Sprintf("update-tool-%s-%s.mhd", req.Scope, time.Now().Format("20060102-1504")),
 			"data":     base64.StdEncoding.EncodeToString(sealed),
 			"counts": map[string]int{
 				"datasources": len(bundle.DataSources),
@@ -5707,12 +5707,12 @@ func makeRelease(args []string) {
 	sums := make([]string, 0, 2)
 	for _, osname := range []string{"win", "mac", "linux"} {
 		// 支持随机后缀：medupdate-win-1.0.5-a8f3c2.zip
-		matches, _ := filepath.Glob(filepath.Join(*dir, fmt.Sprintf("medupdate-%s-*.zip", osname)))
+		matches, _ := filepath.Glob(filepath.Join(*dir, fmt.Sprintf("update-tool-%s-*.zip", osname)))
 		if osname == "linux" && len(matches) == 0 {
 			continue // linux 包可选，没打就不进清单
 		}
 		if len(matches) != 1 {
-			fmt.Fprintf(os.Stderr, "%s 目录下应当正好有一个 medupdate-%s-*.zip，实际 %d 个\n", *dir, osname, len(matches))
+			fmt.Fprintf(os.Stderr, "%s 目录下应当正好有一个 update-tool-%s-*.zip，实际 %d 个\n", *dir, osname, len(matches))
 			os.Exit(2)
 		}
 		p := matches[0]

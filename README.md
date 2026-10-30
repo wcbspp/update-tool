@@ -83,10 +83,10 @@ Go 单文件服务 + 内嵌网页，零运行时依赖：Windows 双击 `exe` �
 
 ```bash
 # macOS / Linux
-./medupdate
+./update-tool
 
 # Windows
-medupdate.exe
+update-tool.exe
 ```
 
 启动后自动打开浏览器，默认只监听 `127.0.0.1:8787`（设置里可切到「允许局域网」）。
@@ -171,7 +171,7 @@ MYSQL_TEST_DSN='root:口令@tcp(127.0.0.1:3306)/medupdate_test' go test ./...
 产出：
 
 ```
-release-win/medupdate.exe      Windows amd64
+release-win/update-tool.exe    Windows amd64
 release-mac/medupdate          macOS arm64
 release-linux/medupdate        Linux amd64
 dist/<已有>.app                若 dist 下已有 .app：同步新二进制并重签名（不会新建）

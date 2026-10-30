@@ -281,7 +281,7 @@ func TestAPIExportImport(t *testing.T) {
 	if b64 == "" || r["filename"] == "" {
 		t.Fatalf("导出内容不对：%v", r)
 	}
-	if !strings.HasPrefix(r["filename"].(string), "medupdate-all-") {
+	if !strings.HasPrefix(r["filename"].(string), "update-tool-all-") {
 		t.Fatalf("文件名不对：%v", r["filename"])
 	}
 
@@ -357,17 +357,17 @@ func TestAPIReleaseDownloadWhitelist(t *testing.T) {
 	if err := os.MkdirAll(dist, 0o700); err != nil {
 		t.Fatalf("建 dist 失败: %v", err)
 	}
-	good := "medupdate-mac-1.0.4-abcdef.zip"
+	good := "update-tool-mac-1.0.4-abcdef.zip"
 	if err := os.WriteFile(filepath.Join(dist, good), []byte("PK"), 0o600); err != nil {
 		t.Fatalf("写包失败: %v", err)
 	}
 	// 不合规的包名不能下载
-	bad := "medupdate-whatever.zip"
+	bad := "update-tool-whatever.zip"
 	if err := os.WriteFile(filepath.Join(dist, bad), []byte("PK"), 0o600); err != nil {
 		t.Fatalf("写包失败: %v", err)
 	}
 	// 符号链接指向配置文件，必须 404
-	link := "medupdate-win-1.0.4-abcdef.zip"
+	link := "update-tool-win-1.0.4-abcdef.zip"
 	if err := os.Symlink(filepath.Join(dir, "data.json"), filepath.Join(dist, link)); err != nil {
 		// 建不起链接就等于这一项没测，不能让它白过
 		t.Fatalf("建符号链接失败，无法验证软链防护: %v", err)

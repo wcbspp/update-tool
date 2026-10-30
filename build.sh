@@ -18,16 +18,16 @@ if [ -n "${UPDATE_URL:-}" ]; then LDX="$LDX -X main.defaultUpdateURL=$UPDATE_URL
 FLAGS=(-trimpath -ldflags "$LDX")
 
 echo "→ windows/amd64（无控制台窗口）"
-GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H windowsgui -X main.buildTime=$BT${UPDATE_URL:+ -X main.defaultUpdateURL=$UPDATE_URL}" -o ../release-win/medupdate.exe .
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H windowsgui -X main.buildTime=$BT${UPDATE_URL:+ -X main.defaultUpdateURL=$UPDATE_URL}" -o ../release-win/update-tool.exe .
 
 echo "→ darwin/arm64"
-GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../release-mac/medupdate .
+GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../release-mac/update-tool .
 
 echo "→ linux/amd64"
-GOOS=linux GOARCH=amd64 go build "${FLAGS[@]}" -o ../release-linux/medupdate .
+GOOS=linux GOARCH=amd64 go build "${FLAGS[@]}" -o ../release-linux/update-tool .
 
 # 本机运行用的副本（launchd 指向它）
-GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../medupdate .
+GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../update-tool .
 
 # macOS App 包里的二进制也要更新，否则双击 app 跑的还是老代码
 echo "→ 更新 macOS App 包"
@@ -44,7 +44,7 @@ if [ ! -d "$APP" ]; then
   fi
 fi
 if [ -d "$APP" ]; then
-  cp ../release-mac/medupdate "$APP/Contents/MacOS/medupdate"
+  cp ../release-mac/update-tool "$APP/Contents/MacOS/medupdate"
   chmod +x "$APP/Contents/MacOS/medupdate"
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APPVER" "$APP/Contents/Info.plist" >/dev/null
   codesign --force --deep -s - "$APP" >/dev/null 2>&1 || true
@@ -52,5 +52,5 @@ if [ -d "$APP" ]; then
 fi
 
 echo "$BT" > ../build_id.txt
-ls -lh ../release-win/medupdate.exe ../release-mac/medupdate ../release-linux/medupdate
+ls -lh ../release-win/update-tool.exe ../release-mac/update-tool ../release-linux/update-tool
 if [ -d "$APP" ]; then ls -l "$APP/Contents/MacOS/medupdate"; fi

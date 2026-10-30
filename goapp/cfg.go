@@ -27,7 +27,9 @@ const (
 	exportMagic = "MHX1" // 导出文件（同一密钥，靠魔数区分，防止把 data.json 当导出文件导入）
 	cfgFormat   = 1
 
-	exportKind = "medupdate-export"
+	exportKind = "update-tool-export"
+	// 旧版本导出的文件用这个 kind，导入时也要认
+	legacyExportKind = "medupdate-export"
 )
 
 var errNotSealed = errors.New("不是本程序的加密文件")
@@ -354,7 +356,7 @@ type ImportSummary struct {
 // planImport: 纯函数，不改动传入的 Store。overwrite=true 时同名脚本覆盖 SQL。
 func planImport(cur Store, b ExportBundle, overwrite bool) (Store, ImportSummary, error) {
 	var sum ImportSummary
-	if b.Kind != exportKind {
+	if b.Kind != exportKind && b.Kind != legacyExportKind {
 		return cur, sum, errors.New("这不是本程序的导出文件")
 	}
 	if b.FormatVersion != 1 {

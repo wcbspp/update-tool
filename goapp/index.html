@@ -425,6 +425,11 @@
   /* 生产 / 测试：一眼分得出来，避免在错误的库上执行。
      带 data-key 的规则选择器优先级更高，这里必须写全，否则会被盖掉 */
   .badge.prod,.node[data-key^="d"] .badge.prod{color:#ffe1e4;border-color:#a63a44;background:#5c1a21;font-weight:700;letter-spacing:.02em;}
+  /* 数据源行：左侧 3px 色条，绿色=测试、红色=生产，扫一眼就能分清 */
+  .node.ds-row{position:relative;}
+  .node.ds-row::before{content:'';position:absolute;left:0;top:3px;bottom:3px;width:3px;border-radius:2px;}
+  .node.ds-row.env-test::before{background:#4fd07d;}
+  .node.ds-row.env-prod::before{background:#ff5a6a;}
   .badge.test,.node[data-key^="d"] .badge.test{color:#c8f0d6;border-color:#2f6b45;background:#10301f;font-weight:600;letter-spacing:.02em;}
   .badge.prod::before{content:'●';margin-right:3px;color:#ff6b78;font-size:8px;vertical-align:1px;}
   .badge.test::before{content:'●';margin-right:3px;color:#4fd07d;font-size:8px;vertical-align:1px;}
@@ -1080,7 +1085,7 @@
 <main>
   <div class="navmask" id="navmask" onclick="closeNav()"></div>
   <aside>
-    <div class="search" style="margin-top:9px"><input id="q" placeholder="搜索脚本…" oninput="queueTree()"></div>
+    <div class="search" style="margin-top:9px"><input id="q" placeholder="搜索脚本或文件夹（跨所有连接）" oninput="queueTree()" onkeydown="if(event.key==='Escape'){this.value='';queueTree();}"></div>
     <div class="tree" id="tree" role="tree" aria-label="脚本目录"></div>
     <div class="niuma" id="niuma" onclick="toggleNiuma()" title="点一下，换个状态">
       <span class="nm-ico" id="nmIco">🐮</span>
@@ -1627,6 +1632,8 @@ function indexTree() {
       for (const sc of g.scripts || []) {
         IDX.s[sc.id] = {
           id: sc.id, name: sc.name, lines: sc.lines, groupId: g.id,
+          dsId: isTop ? (g.dsId || '') : (top.dsId || ''),
+          dsName: isTop ? (g.dsName || '') : (top.dsName || ''),
           path: path.concat(g.name, sc.name),
           folderName: (isTop ? g.name : top.name),
           ownPreflight: (sc.preflight === undefined ? null : sc.preflight),
@@ -1766,7 +1773,20 @@ function renderTree() {
   closeRowMenu();   // 树一重绘，旧菜单定位的节点就没了，先收掉
   const q = ($('q').value || '').toLowerCase().trim();
   const dsOpen = openState['ds'] !== false;
+  const curDs = curScriptDs();
   let h = '';
+
+  const alive = new Set(DS.map(d => d.id));
+  const orphanFolders = FOLDERS.filter(f => !(f.dsId || '') || !alive.has(f.dsId));
+  const orphanScripts = ROOT_SCRIPTS.filter(sc => !(sc.dsId || '') || !alive.has(sc.dsId));
+
+  // 搜索时不分组：连接一多，分组树里找东西要先展开再找，平铺最快
+  if (q) {
+    h += flatSearchHTML(q);
+    $('tree').innerHTML = h;
+    bindTree();
+    return;
+  }
 
   h += `<div class="sect" role="button" tabindex="0" aria-expanded="${dsOpen ? 'true' : 'false'}" onclick="toggleSection('ds')" onkeydown="sectKey(event,'ds')">
       <span class="chev ${dsOpen ? 'open' : ''}">▶</span><span class="dot ${overallHealth()}"></span>数据源
@@ -1776,33 +1796,90 @@ function renderTree() {
   if (dsOpen) {
     if (!DS.length) h += `<div class="empty">还没有连接。<br>点右上「＋」新建一个。</div>`;
     for (const d of DS) {
-      const envTxt = d.env === 'test' ? '测试' : '生产';
-      const st = DS_HEALTH[d.id] === 'ok' ? '正常' : DS_HEALTH[d.id] === 'fail' ? '失败' : '未检测';
-      const tip = `${d.name}（${envTxt}）\n${d.user}@${d.host}:${d.port}/${d.database || ''}\n状态：${st}`;
-      h += `<div class="node" data-key="d${d.id}" title="${esc(tip)}" style="padding-left:16px;padding-right:26px">
-        <span class="ico">${iconFor('d')}</span>
-        <span class="dot ${DS_HEALTH[d.id] === 'ok' ? 'ok' : DS_HEALTH[d.id] === 'fail' ? 'fail' : ''}"></span>
-        <span class="lbl">${esc(d.name)}</span>
-        <span class="badge ${d.env === 'test' ? 'test' : 'prod'}">${d.env === 'test' ? '测试' : '生产'}</span>
-        <span class="acts"><button class="more" data-act="rowMenu" data-arg="d${d.id}" data-menu="${encodeURIComponent(JSON.stringify([
-          ['⟳', 'actCheckDs', 'd' + d.id, '检测连接 / 重连'],
-          ['＋', 'actAddGroup', 'd' + d.id, '新建顶层文件夹'],
-          ['✚', 'actAddRootScript', 'd' + d.id, '新建单层脚本'],
-          ['✎', 'editDs', 'd' + d.id, '编辑连接'],
-          ['⇩', 'exportCfg', 'd' + d.id, '导出此连接的配置'],
-          ['✕', 'delDs', 'd' + d.id, '删除连接']
-        ]))}" title="更多">⋯</button></span>
-      </div>`;
+      // 默认只展开当前脚本所在的库，其余收起来：连接再多也不会一屏铺满
+      const open = dsOpenFor(d.id, curDs);
+      h += dsNodeHTML(d, open);
+      if (open) h += dsChildrenHTML(d.id, '', 1);
     }
-    h += `<div style="height:4px"></div>`;
   }
 
-  h += `<div class="sect" style="cursor:default" role="heading" aria-level="2"><span style="width:11px"></span><span class="dot gray"></span>脚本<span class="n">${Object.keys(IDX.s).length}</span></div>`;
-  h += foldersHTML(FOLDERS, 0, q);
+  // 「未绑定」不放折叠块里：它不属于任何数据源，收起数据源也不该把它藏起来
+  if (orphanFolders.length || orphanScripts.length) {
+    h += `<div class="sect" style="cursor:default" role="heading" aria-level="1"><span style="width:11px"></span><span class="dot gray"></span>未绑定<span class="n">${orphanFolders.length + orphanScripts.length}</span></div>`;
+    h += foldersHTML(orphanFolders, 1, '');
+    h += rootScriptsHTML(orphanScripts, '', 1, true);
+  }
+
+  $('tree').innerHTML = h;
+  bindTree();
+}
+
+// 搜索：平铺所有命中的脚本和文件夹，每行标出属于哪个库
+function flatSearchHTML(q) {
+  const rows = [];
+  const walkFolders = (nodes, path, dsName, depth) => {
+    for (const g of nodes || []) {
+      const ds = dsName || g.dsName || '';
+      if ((g.name || '').toLowerCase().includes(q)) {
+        rows.push({ kind: 'g', id: g.id, name: g.name, ds: ds, path: path.join(' / '), depth: depth });
+      }
+      for (const sc of g.scripts || []) {
+        if ((sc.name || '').toLowerCase().includes(q)) {
+          rows.push({ kind: 's', id: sc.id, name: sc.name, ds: ds, path: path.concat(g.name).join(' / '), lines: sc.lines });
+        }
+      }
+      walkFolders(g.folders, path.concat(g.name), ds, depth + 1);
+    }
+  };
+  walkFolders(FOLDERS, [], '', 0);
   for (const sc of ROOT_SCRIPTS) {
+    if ((sc.name || '').toLowerCase().includes(q)) {
+      rows.push({ kind: 's', id: sc.id, name: sc.name, ds: sc.dsName || '', path: '', lines: sc.lines });
+    }
+  }
+  if (!rows.length) return `<div class="empty">没有匹配「${esc(q)}」的脚本或文件夹</div>`;
+  let h = `<div class="sect" style="cursor:default" role="heading" aria-level="1"><span style="width:11px"></span><span class="dot gray"></span>搜索结果<span class="n">${rows.length}</span></div>`;
+  for (const r of rows) {
+    h += row({ key: r.kind + r.id, depth: 1, ico: r.kind === 'g' ? '📁' : '📄',
+      label: r.name, sub: r.kind === 's' ? (r.lines || 0) + ' 行' : '',
+      badge: r.ds || '未挂库',
+      tip: r.name + '\n' + (r.ds || '未挂库') + (r.path ? '\n' + r.path : ''),
+      sel: r.kind === 's' && CUR === r.id,
+      acts: r.kind === 's'
+        ? [['⚙', 'scriptSettings', 's' + r.id, '脚本设置'], ['✕', 'delScript', 's' + r.id, '删除脚本']]
+        : (r.depth === 0 ? [['⚙', 'folderSettings', 'g' + r.id, '文件夹设置']] : []) });
+  }
+  return h;
+}
+
+function toggleDs(e, id) {
+  // 点「⋯」不触发折叠
+  if (e && e.target && e.target.closest && e.target.closest('.acts')) return;
+  const k = 'd' + id;
+  openState[k] = openState[k] === false;   // 未设置 → 当作展开，点一下收起
+  renderTree();
+}
+
+// 一个数据源自己的文件夹 + 单层脚本，挂在它下面（Navicat 那种分组）
+function dsChildrenHTML(dsId, q, depth) {
+  const fs = FOLDERS.filter(f => (f.dsId || '') === dsId);
+  const ss = ROOT_SCRIPTS.filter(sc => (sc.dsId || '') === dsId);
+  const shownF = fs.filter(f => subtreeMatch(f, q)).length;
+  const shownS = ss.filter(sc => !q || sc.name.toLowerCase().includes(q)).length;
+  let h = foldersHTML(fs, depth, q);
+  h += rootScriptsHTML(ss, q, depth + 1, false);
+
+  return h;
+}
+
+function rootScriptsHTML(list, q, depth, showDsBadge) {
+  let h = '';
+  for (const sc of list || []) {
     if (q && !sc.name.toLowerCase().includes(q)) continue;
-    h += row({ key: 's' + sc.id, depth: 0, ico: '📄', label: sc.name, sub: sc.lines + ' 行',
-      badge: sc.dsName || '未挂库', sel: CUR === sc.id,
+    h += row({ key: 's' + sc.id, depth: depth, ico: '📄', label: sc.name, sub: sc.lines + ' 行',
+      tip: sc.name + '\n' + (sc.dsName || (showDsBadge ? '未挂库' : '')),
+      badge: showDsBadge ? (sc.dsName || '未挂库') : '',
+      sel: CUR === sc.id,
       acts: [['↑', 'actMove', 's' + sc.id + '|up', '上移'],
              ['↓', 'actMove', 's' + sc.id + '|down', '下移'],
              ['⚙', 'scriptSettings', 's' + sc.id, '脚本设置：数据源 / 预检 / 版本'],
@@ -1810,12 +1887,41 @@ function renderTree() {
              ['✎', 'editScript', 's' + sc.id, '重命名'],
              ['✕', 'delScript', 's' + sc.id, '删除脚本']] });
   }
-  if (!FOLDERS.length && !ROOT_SCRIPTS.length) {
-    h += `<div class="empty">还没有文件夹。<br>在上面的数据源右侧点 ＋ 新建。</div>`;
-  }
+  return h;
+}
 
-  $('tree').innerHTML = h;
-  bindTree();
+// 数据源行：左侧色条标生产/测试，状态点、徽标、更多菜单都保留
+// 当前脚本属于哪个库：折叠时默认只展开它，其他的都收起来
+function curScriptDs() {
+  if (!CUR || !IDX.s[CUR]) return '';
+  return IDX.s[CUR].dsId || '';
+}
+
+function dsOpenFor(id, curDs) {
+  const v = openState['d' + id];
+  if (v !== undefined) return v !== false;
+  return id === curDs;      // 没手动动过时，只展开当前在用那个库
+}
+
+function dsNodeHTML(d, open) {
+  const envTxt = d.env === 'test' ? '测试' : '生产';
+  const st = DS_HEALTH[d.id] === 'ok' ? '正常' : DS_HEALTH[d.id] === 'fail' ? '失败' : '未检测';
+  const tip = `${d.name}（${envTxt}）\n${d.user}@${d.host}:${d.port}/${d.database || ''}\n状态：${st}`;
+  return `<div class="node ds-row ${d.env === 'test' ? 'env-test' : 'env-prod'}" data-key="d${d.id}" role="treeitem" tabindex="0" aria-level="1" aria-expanded="${open ? 'true' : 'false'}" title="${esc(tip)}" onclick="toggleDs(event,'${d.id}')" style="padding-left:10px;padding-right:26px">
+      <span class="chev ${open ? 'open' : ''}">▶</span>
+      <span class="ico">${iconFor('d')}</span>
+      <span class="dot ${DS_HEALTH[d.id] === 'ok' ? 'ok' : DS_HEALTH[d.id] === 'fail' ? 'fail' : ''}"></span>
+      <span class="lbl">${esc(d.name)}</span>
+      <span class="badge ${d.env === 'test' ? 'test' : 'prod'}">${envTxt}</span>
+      <span class="acts"><button class="more" data-act="rowMenu" data-arg="d${d.id}" data-menu="${encodeURIComponent(JSON.stringify([
+        ['⟳', 'actCheckDs', 'd' + d.id, '检测连接 / 重连'],
+        ['＋', 'actAddGroup', 'd' + d.id, '新建顶层文件夹'],
+        ['✚', 'actAddRootScript', 'd' + d.id, '新建单层脚本'],
+        ['✎', 'editDs', 'd' + d.id, '编辑连接'],
+        ['⇩', 'exportCfg', 'd' + d.id, '导出此连接的配置'],
+        ['✕', 'delDs', 'd' + d.id, '删除连接']
+      ]))}" title="更多">⋯</button></span>
+    </div>`;
 }
 
 function foldersHTML(nodes, depth, q) {
@@ -2042,7 +2148,7 @@ async function delDs(key) {
   if (busyBlocked()) return;
   const id = key.slice(1);
   const ds = DS.find(x => x.id === id);
-  if (!confirm(`删除数据源「${ds ? ds.name : ''}」？挂它的文件夹会变成「未挂库」。`)) return;
+  if (!confirm(`删除数据源「${ds ? ds.name : ''}」？\n它下面的文件夹和脚本会一起删除（后端是级联删除），删前建议先「导出此连接的配置」。`)) return;
   await del('/api/ds?id=' + id);
   await loadTree();
   if (CUR && !IDX.s[CUR]) clearEditor();

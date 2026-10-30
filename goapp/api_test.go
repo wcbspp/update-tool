@@ -736,3 +736,56 @@ func TestAPIUpdateFetchRejectsDowngrade(t *testing.T) {
 		t.Fatalf("不比当前版本新的包应被拒绝: %v", out)
 	}
 }
+
+// 跨库排序：顶层文件夹只在同一个数据源内交换，不能动另一个库的顺序
+func TestAPIOrderScopedToDatasource(t *testing.T) {
+	setupHome(t)
+	for _, n := range []string{"A", "B"} {
+		mustOK(t, call(t, http.MethodPost, "/api/ds", map[string]any{
+			"name": n, "host": "127.0.0.1", "port": 3306, "user": "root", "database": n, "env": "test",
+		}))
+	}
+	tr := mustOK(t, call(t, http.MethodGet, "/api/tree", nil))
+	dss := tr["datasources"].([]any)
+	aID := dss[0].(map[string]any)["id"].(string)
+	bID := dss[1].(map[string]any)["id"].(string)
+
+	for _, g := range []struct{ name, ds string }{{"A-1", aID}, {"A-2", aID}, {"B-1", bID}} {
+		mustOK(t, call(t, http.MethodPost, "/api/group", map[string]any{"name": g.name, "dsId": g.ds}))
+	}
+
+	// 树里的顺序由数组位置表达（没有 order 字段）
+	layout := func() ([]string, string) {
+		tr := mustOK(t, call(t, http.MethodGet, "/api/tree", nil))
+		names := []string{}
+		var a1ID string
+		for _, raw := range tr["folders"].([]any) {
+			m := raw.(map[string]any)
+			names = append(names, m["name"].(string))
+			if m["name"] == "A-1" {
+				a1ID = m["id"].(string)
+			}
+		}
+		return names, a1ID
+	}
+
+	before, a1 := layout()
+	idxOf := func(list []string, name string) int {
+		for i, n := range list {
+			if n == name {
+				return i
+			}
+		}
+		return -1
+	}
+
+	mustOK(t, call(t, http.MethodPost, "/api/order", map[string]any{"kind": "group", "id": a1, "dir": 1}))
+
+	after, _ := layout()
+	if idxOf(before, "B-1") != idxOf(after, "B-1") {
+		t.Fatalf("跨库排序：B 库的位置被动了（前 %v 后 %v）", before, after)
+	}
+	if !(idxOf(after, "A-1") > idxOf(after, "A-2")) {
+		t.Fatalf("同库内下移没生效：前 %v 后 %v", before, after)
+	}
+}

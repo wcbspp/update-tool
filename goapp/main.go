@@ -1000,7 +1000,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.1.4"
+const appVersion = "1.1.5"
 
 type cell = any
 
@@ -5894,9 +5894,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					parent = g.ParentID
 				}
 			}
+			// 顶层节点只在同一个数据源里排序：界面已经按数据源分组了，
+			// 跨组交换会让用户看到「点了没反应」。
+			dsid := ""
+			if parent == "" {
+				for _, g := range st.Groups {
+					if g.ID == b.ID {
+						dsid = g.DSID
+					}
+				}
+			}
 			idxs := []int{}
 			for i, g := range st.Groups {
-				if g.ParentID == parent {
+				if g.ParentID == parent && (parent != "" || g.DSID == dsid) {
 					idxs = append(idxs, i)
 				}
 			}
@@ -5922,9 +5932,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					gid = sc.GroupID
 				}
 			}
+			dsid := ""
+			if gid == "" {
+				for _, sc := range st.Scripts {
+					if sc.ID == b.ID {
+						dsid = sc.DSID
+					}
+				}
+			}
 			idxs := []int{}
 			for i, sc := range st.Scripts {
-				if sc.GroupID == gid {
+				if sc.GroupID == gid && (gid != "" || sc.DSID == dsid) {
 					idxs = append(idxs, i)
 				}
 			}

@@ -1,0 +1,32 @@
+#!/bin/bash
+# 开源仓库守卫：阻止把内部/业务内容提交进来。
+# 敏感词表放在 .githooks/.blocklist（不入库），避免守卫自己泄露关键词。
+set -u
+fail=0
+
+# 1) 一律禁止的路径
+for f in $(git diff --cached --name-only --diff-filter=ACM); do
+  case "$f" in
+    data.json|data.json.tmp|docs/PROJECT.md|release.sh)
+      echo "✗ 禁止提交：$f（内部文件）"; fail=1 ;;
+    scripts/*|ops/*|backups/*|dist/*|logs/*)
+      echo "✗ 禁止提交到该目录：$f"; fail=1 ;;
+  esac
+done
+
+# 2) 内容检查（词表存在才做）
+if [ -f .githooks/.blocklist ]; then
+  hits=$(git diff --cached -U0 -- . ':!.githooks' \
+    | grep -E '^\+' \
+    | grep -Ff .githooks/.blocklist 2>/dev/null | head -5)
+  if [ -n "$hits" ]; then
+    echo "✗ 暂存内容里出现内部信息："
+    echo "$hits" | cut -c1-120
+    fail=1
+  fi
+fi
+
+if [ "$fail" -eq 1 ]; then
+  echo "  确属误报可用 git commit --no-verify 跳过"
+fi
+exit "$fail"

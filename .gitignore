@@ -23,3 +23,6 @@ run-log.jsonl
 
 # 构建时间戳（每次构建都变，不入库）
 build_id.txt
+
+# 守卫词表（含内部关键词，不入库）
+.githooks/.blocklist

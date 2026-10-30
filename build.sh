@@ -31,13 +31,17 @@ GOOS=darwin GOARCH=arm64 go build "${FLAGS[@]}" -o ../medupdate .
 
 # macOS App 包里的二进制也要更新，否则双击 app 跑的还是老代码
 echo "→ 更新 macOS App 包"
+# 指定了就用指定的；没指定时优先 update-tool.app，再退到 dist 下唯一的 .app。
+# 多个 .app 并存时必须显式给 APP_BUNDLE，否则不知道该更新哪一个。
 APP="${APP_BUNDLE:-../dist/update-tool.app}"
-# 没指定且默认目录不存在时，退而使用 dist 下任意一个 .app，
-# 避免本机改名后这里静默跳过、双击跑的还是老代码
 if [ ! -d "$APP" ]; then
-  for cand in ../dist/*.app; do
-    [ -d "$cand" ] && APP="$cand" && break
-  done
+  apps=(../dist/*.app)
+  if [ ${#apps[@]} -eq 1 ] && [ -d "${apps[0]}" ]; then
+    APP="${apps[0]}"
+  elif [ ${#apps[@]} -gt 1 ]; then
+    echo "  ⚠ dist 下有多个 .app，未指定要更新哪个；设 APP_BUNDLE=… 后再构建" >&2
+    APP=""
+  fi
 fi
 if [ -d "$APP" ]; then
   cp ../release-mac/medupdate "$APP/Contents/MacOS/medupdate"

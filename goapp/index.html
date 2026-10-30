@@ -1133,7 +1133,7 @@
 const $ = id => document.getElementById(id);
 let CUR = null, dirty = false, fmtPrev = null, openState = {}, CUR_PRE = true, EDIT_MODE = false, CUR_ENV = 'prod';
 let PREVIEWS = [];
-let LOGS = [], logFilter = { ok: '', dry: '' };
+let LOGS = [], logFilter = { ok: '' };
 let PREFLIGHT_ON = true;
 // 全局「忙」标记：run / preflight / check / save 其一进行中，禁止再发请求或改结构
 let BUSY = '';
@@ -3388,11 +3388,10 @@ function syncFilterButtons() {
 async function loadLogs() {
   const qs = new URLSearchParams({ limit: '200' });
   if (logFilter.ok) qs.set('ok', logFilter.ok);
-  if (logFilter.dry) qs.set('dry', logFilter.dry);
   try {
     const r = await api('/api/logs?' + qs.toString());
     // 选了「仅预演/仅执行」就不该混进语法校验记录
-    LOGS = (r.logs || []).filter(l => !logFilter.dry || l.type !== 'check');
+    LOGS = (r.logs || []);
     renderLogs();
   } catch (e) {
     $('lwrap').innerHTML = `<div style="padding:14px;color:#ff9a9a">${esc(e.message)}</div>`;
@@ -3434,7 +3433,7 @@ function logDetail(l) {
     lines.push(`时间：${l.ts}    模式：语法校验    耗时：${l.ms}ms    语句：${l.stmts} 条`);
     lines.push(`校验范围：${l.selOnly ? '仅选中片段' : '整段'}    结果：${l.ok ? '通过' : '有问题'}`);
   } else {
-    lines.push(`时间：${l.ts}    耗时    耗时：${l.ms}ms    语句：${l.stmts} 条`);
+    lines.push(`时间：${l.ts}    耗时：${l.ms}ms    语句：${l.stmts} 条`);
     lines.push(`影响行数：${l.affected || 0}    数据版本：${logVersion(l) || '-'}`);
   }
   if (l.type === 'preflight') lines.push(`类型：预检（只读）    错误 ${l.errCount || 0} 项    提醒 ${l.warnCount || 0} 项`);

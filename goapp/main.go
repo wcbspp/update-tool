@@ -838,15 +838,14 @@ func firstDMLIsSelect(s string) bool {
 
 // autocommit 能被写成 SET SESSION / SET @@ / SET GLOBAL 多种形式，
 // 逐种前缀匹配一定会漏；命中就直接拒绝，因为没有它事务语义就不成立。
-var reAutocommit = regexp.MustCompile(`(?i)\bautocommit\b`)
+var reAutocommit = regexp.MustCompile("(?i)^\\s*set\\s+(?:(?:session|global|local)\\s+|@@(?:session\\.|global\\.|local\\.)?)?`?autocommit`?\\s*(?::?=)")
 
 // findAutocommitStmt 找出试图改变 autocommit 的语句（只在 SET 语句里找，
 // 避免把字符串字面量里的 autocommit 也算进来）。
 func findAutocommitStmt(stmts []string) []int {
 	out := make([]int, 0, 1)
 	for i, st := range stmts {
-		t := strings.ToUpper(strings.TrimSpace(stripSQLComments(st)))
-		if strings.HasPrefix(t, "SET") && reAutocommit.MatchString(st) {
+		if reAutocommit.MatchString(strings.TrimSpace(stripSQLComments(st))) {
 			out = append(out, i)
 		}
 	}
@@ -1067,6 +1066,13 @@ func writeTargetRefs(stmts []string, schema string) []tableRef {
 		case "delete":
 			if m := reDelete.FindStringSubmatch(st); m != nil {
 				add(m[1])
+			} else if mm := reDeleteMulti.FindStringSubmatch(st); mm != nil {
+				// DELETE t1 FROM t1 JOIN t2 ...：只认 FROM 前面那串表名
+				for _, part := range splitTopLevel(mm[1]) {
+					if fs := strings.Fields(strings.TrimSpace(part)); len(fs) > 0 {
+						add(strings.Trim(fs[0], "`\""))
+					}
+				}
 			}
 		}
 	}
@@ -1310,6 +1316,22 @@ func splitSetAssignments(s string) []string {
 	return out
 }
 
+// tblKey 把「库.表」做成稳定的 map 键；schema 为空时用数据源默认库
+func tblKey(sch, defSch, table string) string {
+	if sch == "" {
+		sch = defSch
+	}
+	return sch + "." + table
+}
+
+// splitTblKey 拆回库名和表名；没有点号时用默认库
+func splitTblKey(k, defSch string) (string, string) {
+	if i := strings.Index(k, "."); i > 0 {
+		return k[:i], k[i+1:]
+	}
+	return defSch, k
+}
+
 func updateWriteTables(tablesPart, setPart string) []string {
 	type ent struct{ raw, alias string }
 	ents := make([]ent, 0, 2)
@@ -1525,7 +1547,7 @@ func explainCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 20*time.Second)
 }
 
-type tblRef struct{ table, alias string }
+type tblRef struct{ schema, table, alias string }
 
 // 用执行计划估算影响行数：不执行查询，只看 EXPLAIN 的 rows
 func estimateByExplain(db *sql.DB, st, target, alias string) (int64, bool) {
@@ -1873,7 +1895,11 @@ func mResolveTable(db *sql.DB, schema, name string) string {
 func mTablesHavingCol(db *sql.DB, schema string, refs []tblRef, col string) []tblRef {
 	out := make([]tblRef, 0)
 	for _, r := range refs {
-		if mHasColumn(db, schema, r.table, col) {
+		sch := r.schema
+		if sch == "" {
+			sch = schema
+		}
+		if mHasColumn(db, sch, r.table, col) {
 			out = append(out, r)
 		}
 	}
@@ -2784,7 +2810,7 @@ func estimateUpdate(db *sql.DB, schema, st string, pfSec int, hintTable, hintAli
 	setPart = cutAtKeyword(setPart, "limit")
 
 	alias := ""
-	for _, asg := range splitTopLevel(setPart) {
+	for _, asg := range splitSetAssignments(setPart) {
 		lhs := asg
 		if eq := indexTopLevel(asg, '='); eq >= 0 {
 			lhs = asg[:eq]
@@ -3766,11 +3792,12 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 	var updPending []updTask
 
 	type delTask struct {
-		i     int
-		stmt  string
-		table string
-		where string
-		lim   int64
+		i      int
+		stmt   string
+		schema string
+		table  string
+		where  string
+		lim    int64
 	}
 	var delPending []delTask
 
@@ -3985,7 +4012,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 
 			updated := map[string]bool{}
 			var unqual []string
-			for _, asg := range splitTopLevel(setPart) {
+			for _, asg := range splitSetAssignments(setPart) {
 				lhs := asg
 				if eq := indexTopLevel(asg, '='); eq >= 0 {
 					lhs = asg[:eq]
@@ -4008,7 +4035,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					// 否则会拿当前库的同名表做判断，非事务引擎就漏报了
 					sch, nm := tblSchemaOf(schema, firstIdent(part))
 					real := mResolveTable(db, sch, normTable(nm))
-					refs = append(refs, tblRef{real, a})
+					refs = append(refs, tblRef{sch, real, a})
 					if !strings.EqualFold(sch, schema) {
 						noteWrite(sch, real)
 					}
@@ -4031,7 +4058,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 						}
 					}
 					add(i, "ok", "被更新表", fmt.Sprintf("%s（单表更新）", r.table))
-					targetUse[r.table] = append(targetUse[r.table], stmtTarget{stmt: i, where: whereRaw(st), alias: r.alias})
+					targetUse[tblKey(r.schema, schema, r.table)] = append(targetUse[tblKey(r.schema, schema, r.table)], stmtTarget{stmt: i, where: whereRaw(st), alias: r.alias})
 					if n, ok := estimateByExplain(db, st, r.table, r.alias); ok {
 						tail := " · 全表扫（数据量小时优化器会这样选，不代表缺索引）"
 						if keys := explainIndexes(db, st); keys != "" {
@@ -4068,9 +4095,19 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			}
 
 			if whereTail(st) == "" {
-				if lim := deleteLimit(st); lim > 0 {
+				// JOIN 写法里范围由 ON 条件定，和 DELETE ... JOIN 一样只给提醒；
+				// 纯逗号列表没有 WHERE 才是真正的整表改。
+				hasJoin := false
+				if j, _ := indexTopLevelWord(strings.ToUpper(stripSQLComments(tablesPart)), "join"); j >= 0 {
+					hasJoin = true
+				}
+				switch {
+				case deleteLimit(st) > 0:
+					lim := deleteLimit(st)
 					add(i, "warn", "没有 WHERE 条件", fmt.Sprintf("这条 UPDATE 没有 WHERE，按 LIMIT %d 最多改 %d 行，请确认不是笔误", lim, lim))
-				} else {
+				case hasJoin:
+					add(i, "warn", "没有 WHERE 条件", "这条 UPDATE 没有 WHERE，范围由 JOIN 的 ON 条件决定，请确认不是笔误")
+				default:
 					add(i, "error", "没有 WHERE 条件", "这条 UPDATE 会更新整张表，请确认不是笔误（确实要全表更新请改成 WHERE 1=1 再跑）")
 				}
 			}
@@ -4096,7 +4133,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				if updated[strings.ToLower(ref.alias)] {
 					targetTable = ref.table
 					targetAlias = ref.alias
-					targetUse[ref.table] = append(targetUse[ref.table], stmtTarget{stmt: i, where: whereRaw(st), alias: targetAlias, multi: true})
+					targetUse[tblKey(ref.schema, schema, ref.table)] = append(targetUse[tblKey(ref.schema, schema, ref.table)], stmtTarget{stmt: i, where: whereRaw(st), alias: targetAlias, multi: true})
 					break
 				}
 			}
@@ -4121,6 +4158,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			// 三种写法：单表、DELETE t FROM t JOIN ...、DELETE FROM t USING t JOIN ...
 			var targets []string
 			countTable := ""
+			countSchema := schema
 			multi := false
 			multiDelete := false // 多表写法：WHERE 里无限定列的归属说不清
 			switch {
@@ -4140,6 +4178,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				real := mResolveTable(db, sch, normTable(nm))
 				targets = append(targets, real)
 				countTable = real
+				countSchema = sch
 				if !strings.EqualFold(sch, schema) {
 					noteWrite(sch, real)
 				}
@@ -4199,7 +4238,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				}
 			}
 			if countTable != "" {
-				delPending = append(delPending, delTask{i: i, stmt: stRaw, table: countTable, where: where, lim: lim})
+				delPending = append(delPending, delTask{i: i, stmt: stRaw, schema: countSchema, table: countTable, where: where, lim: lim})
 			}
 		}
 	}
@@ -4310,7 +4349,11 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			pp := delPending[k]
 			tasks[k] = func(c *sql.DB) {
 				t0 := time.Now()
-				res[k].n, res[k].capped, res[k].err = countWhereBounded(c, qualTable(schema, pp.table), pp.where, 300000, pfSec)
+				sch := pp.schema
+				if sch == "" {
+					sch = schema
+				}
+				res[k].n, res[k].capped, res[k].err = countWhereBounded(c, qualTable(sch, pp.table), pp.where, 300000, pfSec)
 				res[k].dur = time.Since(t0)
 			}
 		}
@@ -4387,8 +4430,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		defer conns.give(c)
 		versions = versionReport(c, schema, batchTables, verColName, verPfxs, pfSec)
 	}()
-	for t := range targetUse {
-		noteWrite(schema, t)
+	for k := range targetUse {
+		sch, t := splitTblKey(k, schema)
+		noteWrite(sch, t)
 	}
 	out = append(out, engineWarnings(db, writeRefs, unsureRefs, pfSec)...)
 	out = append(out, trxWarnings(db, schema, pfSec)...)
@@ -5019,7 +5063,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = appendLog(map[string]any{
 			"ts": time.Now().Format(time.RFC3339), "type": "export",
-			"script": "", "ds": "", "database": "", "dryRun": false,
+			"script": "", "ds": "", "database": "",
 			"stmts": len(bundle.Scripts), "ok": true, "ms": 0,
 			"affected": len(bundle.Scripts), "failedAt": -1, "error": "",
 		})
@@ -5051,7 +5095,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = appendLog(map[string]any{
 				"ts": time.Now().Format(time.RFC3339), "type": "import",
-				"script": "", "ds": "", "database": "", "dryRun": false,
+				"script": "", "ds": "", "database": "",
 				"stmts": sum.Scripts + sum.Groups + sum.AddedDS, "ok": ok, "ms": 0,
 				"affected": sum.Updated, "failedAt": -1, "error": msg,
 			})

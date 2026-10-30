@@ -2707,19 +2707,33 @@ function jumpToFirst(level) {
 // 改成独立窗口：不受 .res 的高度约束，复制/查找都方便。
 function openResultWindow() {
   const res = $('res');
-  const w = window.open('', '_blank', 'width=1000,height=780');
-  if (!w) { toast('浏览器拦截了弹出窗口，请允许后重试', 'bad'); return; }
-  // 带上本页样式，颜色和表格跟主界面一致
+  // 不开带尺寸的弹窗（那种窗口不好挪），直接开普通标签页：可移动、可缩放、能整页搜索
+  const w = window.open('', '_blank');
+  if (!w) { toast('浏览器拦截了新窗口，请允许后重试', 'bad'); return; }
   const css = [...document.querySelectorAll('style')].map(s => s.textContent).join('\n');
-  // 去掉所有内联事件：新窗口里没有主界面的函数，留着点了会报 ReferenceError
-  const body = res.innerHTML.replace(/\son[a-z]+="[^"]*"/gi, '');
+  // 新窗口里没有主界面的函数：事件属性全去掉，「展开」按钮也一起去掉（不然就是个死按钮）
+  let body = res.innerHTML.replace(/\son[a-z]+="[^"]*"/gi, '');
+  body = body.replace(/<button[^>]*class="sm sbtn"[^>]*>[\s\S]{0,8}?<\/button>/gi, '');
   w.document.open();
   w.document.write('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
     + '<title>执行结果</title><style>' + css + '</style></head><body>'
-    + '<style>html,body{overflow:auto!important;height:auto!important;}'
-    + 'body{padding:14px;}'
+    + '<style>html,body{overflow:auto!important;height:auto!important;background:#05070b;}'
+    + 'body{padding:16px;}'
     + '.res{height:auto!important;overflow:visible!important;}'
-    + '.lwrap{max-height:none!important;}</style>'
+    + '.lwrap{max-height:none!important;}'
+    // 明细全部展开显示，不需要再点
+    + '.sblock .chk-d{display:block!important;white-space:pre-wrap!important;'
+    + 'overflow:visible!important;text-overflow:clip!important;overflow-wrap:anywhere;}'
+    + '#winbar{position:sticky;top:0;z-index:9;display:flex;gap:8px;align-items:center;'
+    + 'padding:8px 12px;margin:-16px -16px 12px;background:#0b1017ee;border-bottom:1px solid #1e2836;'
+    + 'font:12.5px -apple-system,"PingFang SC",sans-serif;color:#8fa3bd;}'
+    + '#winbar button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid #2a3444;'
+    + 'background:#151b26;color:#dfe8f5;cursor:pointer;}'
+    + '#winbar button:hover{background:#1e2a3f;}'
+    + '</style>'
+    + '<div id="winbar"><span style="flex:1">执行结果（只读快照，明细已全部展开）</span>'
+    + '<button onclick="var t=document.body.innerText;navigator.clipboard&&navigator.clipboard.writeText(t)">复制全部</button>'
+    + '<button onclick="window.close()">关闭</button></div>'
     + '<div class="res">' + body + '</div></body></html>');
   w.document.close();
 }

@@ -1,7 +1,7 @@
 package main
 
 // SQL 执行台 —— 单文件、零运行时依赖的 Go 版
-// 数据源 / 分组 / 脚本，校验（EXPLAIN）、预演（事务回滚）、执行
+// 数据源 / 分组 / 脚本，校验（EXPLAIN）、执行（失败整体回滚）
 
 import (
 	"bytes"
@@ -1012,13 +1012,12 @@ func scanRows(rows *sql.Rows) ([]string, [][]cell, bool, error) {
 }
 
 type stmtResult struct {
-	Affected   int64    `json:"affected"`
-	RolledBack bool     `json:"rolledBack,omitempty"`
-	Info       string   `json:"info,omitempty"`
-	Columns    []string `json:"columns,omitempty"`
-	Rows       [][]cell `json:"rows"`
-	Truncated  bool     `json:"truncated,omitempty"`
-	MS         int64    `json:"ms"`
+	Affected  int64    `json:"affected"`
+	Info      string   `json:"info,omitempty"`
+	Columns   []string `json:"columns,omitempty"`
+	Rows      [][]cell `json:"rows"`
+	Truncated bool     `json:"truncated,omitempty"`
+	MS        int64    `json:"ms"`
 }
 
 // writeTargetRefs 取「会被写到的表」，只给执行前的事务引擎兜底检查用。
@@ -1095,7 +1094,7 @@ func nonTransactionalTables(db *sql.DB, refs []tableRef, sec int) []string {
 	return bad
 }
 
-func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResult, int, string, int64) {
+func runStatements(ds DataSource, stmts []string) (map[string]stmtResult, int, string, int64) {
 	start := time.Now()
 	res := map[string]stmtResult{}
 	db, err := openDB(ds)
@@ -1106,12 +1105,8 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 	// 执行阶段取消 DQL 的统计上限，DML 用 context 单独限时
 	_, _ = db.Exec("SET SESSION max_execution_time = 0")
 
-	// 非事务引擎上 rollback 什么也回滚不了。预演必须拒绝，
-	// 否则界面会说「已回滚」，而数据其实已经落盘。
+	// 非事务引擎上 rollback 什么也回滚不了。算一次，失败时如实告诉用户哪些表改不回来。
 	badEng := nonTransactionalTables(db, writeTargetRefs(stmts, ds.Database), dsPfSec(ds))
-	if dry && len(badEng) > 0 {
-		return res, -1, "这些表不是事务引擎，预演无法回滚，已拒绝：" + strings.Join(badEng, "、"), time.Since(start).Milliseconds()
-	}
 
 	// 超时按「每条语句」算：整段共用一个上下文时，一条慢语句会把
 	// 前面已经成功的语句一起拖到超时，用户看到的是整批回滚。
@@ -1134,7 +1129,6 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 		// 整批已回滚：前面语句的“变更行数”不能留在结果和合计里
 		for k, r := range res {
 			r.Affected = 0
-			r.RolledBack = true
 			res[k] = r
 		}
 		msg := withHint(e.Error())
@@ -1179,11 +1173,7 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 		}
 	}
 
-	if dry {
-		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-			return res, -1, "预演的回滚可能没有完成（" + rbErr.Error() + "）：数据可能已被改动，请先人工核对，不要直接执行。", time.Since(start).Milliseconds()
-		}
-	} else if err := tx.Commit(); err != nil {
+	if err := tx.Commit(); err != nil {
 		// 提交那一刻断线，服务端有可能已经提交成功。只说「失败」会让用户直接重跑。
 		return res, -1, "提交结果未知（" + err.Error() + "）：服务器可能已经提交成功，请先人工核对数据，不要直接重跑。", time.Since(start).Milliseconds()
 	}
@@ -5990,7 +5980,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		var b struct {
 			ScriptID string           `json:"scriptId"`
 			SQL      string           `json:"sql"`
-			DryRun   *bool            `json:"dryRun"`
 			Versions []map[string]any `json:"versions"`
 		}
 		if err := readJSON(r, &b); err != nil {
@@ -6029,12 +6018,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				"error": fmt.Sprintf("第 %d 条是无条件 DELETE，会清空整张表，已拒绝执行；%s", idx, hint)})
 			return
 		}
-		dry := true
-		if b.DryRun != nil {
-			dry = *b.DryRun
-		}
-
-		// 事务由工具统一管理：脚本里自带 COMMIT/ROLLBACK 会直接破坏预演语义
+		// 事务由工具统一管理：脚本里自带 COMMIT/ROLLBACK 会破坏「失败整体回滚」
 		var txnIdx, ddlIdx, useIdx []int
 		for i, st := range stmts {
 			if isTxnControl(st) {
@@ -6049,7 +6033,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(txnIdx) > 0 {
 			writeJSON(w, 400, map[string]any{"ok": false,
-				"error": "第 " + idxList(txnIdx) + " 条是 COMMIT/ROLLBACK/START TRANSACTION。事务由工具管理，请删掉这些语句再执行（否则预演无法回滚）"})
+				"error": "第 " + idxList(txnIdx) + " 条是 COMMIT/ROLLBACK/START TRANSACTION。事务由工具管理，请删掉这些语句再执行"})
 			return
 		}
 		if len(ddlIdx) > 0 {
@@ -6064,7 +6048,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 互斥已由上面的 tryBeginBusy 保证，这里不需要第二把锁
-		results, failedAt, errMsg, ms := runStatements(ds, stmts, dry)
+		results, failedAt, errMsg, ms := runStatements(ds, stmts)
 		previews := make([]string, len(stmts))
 		for i, st := range stmts {
 			previews[i] = preview(st)
@@ -6084,7 +6068,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		appendLog(map[string]any{
 			"ts": time.Now().Format(time.RFC3339), "script": sc.Name, "ds": ds.Name,
-			"dryRun": dry, "stmts": len(stmts), "database": ds.Database,
+			"dryRun": false, "stmts": len(stmts), "database": ds.Database,
 			"ok": okRun, "ms": ms, "failedAt": failedAt, "error": errShort,
 			"previews": logPreviews, "affected": totalAffected, "versions": b.Versions,
 		})

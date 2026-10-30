@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// 跨库写非事务引擎：预演必须拒绝，不能假称「已回滚」。
-// 需要 MYSQL_TEST_DSN（会在里面建一个临时库，跑完 DROP）。
-func TestDryRunRejectsCrossSchemaMyISAM(t *testing.T) {
+// 跨库写非事务引擎：预演必须拒绝，不能假称「已回滚」。// 跨库写非事务引擎：执行失败时必须在错误里点名哪些表改不回来，
+// 不能只说「已回滚」。需要 MYSQL_TEST_DSN（会在里面建临时库，跑完 DROP）。
+func TestRunNamesNonTransactionalTablesOnFailure(t *testing.T) {
 	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
 	db, err := openDB(ds)
 	if err != nil {
@@ -35,17 +35,13 @@ func TestDryRunRejectsCrossSchemaMyISAM(t *testing.T) {
 
 	_, failedAt, msg, _ := runStatements(ds, []string{
 		"UPDATE " + other + ".x_t SET v = 2 WHERE id = 1",
-	}, true)
-	if failedAt >= 0 || !strings.Contains(msg, "事务引擎") {
-		t.Fatalf("跨库 MyISAM 预演应被拒绝，实际 failedAt=%d msg=%q", failedAt, msg)
+		"UPDATE 不存在的表 SET x = 1",
+	})
+	if failedAt != 1 {
+		t.Fatalf("应停在第 2 条，实际 failedAt=%d", failedAt)
 	}
-
-	var v int
-	if err := db.QueryRow("SELECT v FROM " + other + ".x_t WHERE id = 1").Scan(&v); err != nil {
-		t.Fatalf("读回失败: %v", err)
-	}
-	if v != 1 {
-		t.Fatalf("预演不应改动数据，实际 v=%d", v)
+	if !strings.Contains(msg, "非事务引擎") {
+		t.Fatalf("错误里必须点名非事务引擎，实际：%q", msg)
 	}
 }
 

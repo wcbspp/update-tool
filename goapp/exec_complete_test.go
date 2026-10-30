@@ -55,7 +55,7 @@ func TestExecAppliesEveryStatement(t *testing.T) {
 		`INSERT INTO exec_b VALUES (2,'y')`,
 		`UPDATE exec_b SET note='z' WHERE id=1`,
 	}
-	results, failedAt, errMsg, _ := runStatements(ds, stmts, false)
+	results, failedAt, errMsg, _ := runStatements(ds, stmts)
 	if errMsg != "" {
 		t.Fatalf("执行失败于第 %d 条: %s", failedAt+1, errMsg)
 	}
@@ -195,7 +195,7 @@ func TestExecFailureAtAnyPositionLeavesNothing(t *testing.T) {
 		stmts = append(stmts, bad)
 		stmts = append(stmts, good[pos:]...)
 
-		_, failedAt, errMsg, _ := runStatements(ds, stmts, false)
+		_, failedAt, errMsg, _ := runStatements(ds, stmts)
 		if errMsg == "" {
 			t.Fatalf("失败语句插在第 %d 位，却没有报错", pos+1)
 		}
@@ -247,40 +247,6 @@ func TestDriverRejectsMultiStatements(t *testing.T) {
 	}
 }
 
-// 演练模式：多条语句全部「执行」过，但库里不能有任何变化
-func TestExecDryRunTouchesNothing(t *testing.T) {
-	ds := smokeDS(t)
-	execSetup(t, ds)
-	db, err := openDB(ds)
-	if err != nil {
-		t.Fatalf("连接失败: %v", err)
-	}
-	defer db.Close()
-
-	beforeA := execDump(t, db, "exec_a")
-	beforeB := execDump(t, db, "exec_b")
-
-	stmts := []string{
-		`UPDATE exec_a SET v='DRY' WHERE id=1`,
-		`INSERT INTO exec_a VALUES (8,'h',80)`,
-		`DELETE FROM exec_a WHERE id=2`,
-		`UPDATE exec_b SET note='DRY' WHERE id=1`,
-	}
-	results, _, errMsg, _ := runStatements(ds, stmts, true)
-	if errMsg != "" {
-		t.Fatalf("演练报错: %s", errMsg)
-	}
-	if len(results) != len(stmts) {
-		t.Fatalf("演练只返回 %d 条结果，应为 %d 条", len(results), len(stmts))
-	}
-	if a := execDump(t, db, "exec_a"); a != beforeA {
-		t.Fatalf("演练改动了 exec_a\n前：%s\n后：%s", beforeA, a)
-	}
-	if b := execDump(t, db, "exec_b"); b != beforeB {
-		t.Fatalf("演练改动了 exec_b\n前：%s\n后：%s", beforeB, b)
-	}
-}
-
 // 失败时返回的错误里要能定位到第几条
 func TestExecFailureReportsPosition(t *testing.T) {
 	ds := smokeDS(t)
@@ -289,7 +255,7 @@ func TestExecFailureReportsPosition(t *testing.T) {
 		`UPDATE exec_a SET v='x' WHERE id=1`,
 		`INSERT INTO 不存在的表 VALUES (1)`,
 	}
-	_, failedAt, errMsg, _ := runStatements(ds, stmts, false)
+	_, failedAt, errMsg, _ := runStatements(ds, stmts)
 	if errMsg == "" {
 		t.Fatal("应该报错")
 	}

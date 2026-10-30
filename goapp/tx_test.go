@@ -82,7 +82,7 @@ func TestRunStatementsRollback(t *testing.T) {
 		"INSERT INTO tx_probe (id, v) VALUES (1, 'a')",
 		"INSERT INTO tx_probe (id, v) VALUES (1, 'dup')", // 主键冲突
 	}
-	_, failedAt, errMsg, _ := runStatements(ds, stmts, false)
+	_, failedAt, errMsg, _ := runStatements(ds, stmts)
 	if failedAt != 1 || errMsg == "" {
 		t.Fatalf("期望第 2 条失败，实际 failedAt=%d err=%q", failedAt, errMsg)
 	}
@@ -106,32 +106,12 @@ func TestRunStatementsCommit(t *testing.T) {
 		"INSERT INTO tx_probe (id, v) VALUES (1, 'a')",
 		"INSERT INTO tx_probe (id, v) VALUES (2, 'b')",
 	}
-	_, failedAt, errMsg, _ := runStatements(ds, stmts, false)
+	_, failedAt, errMsg, _ := runStatements(ds, stmts)
 	if failedAt != -1 || errMsg != "" {
 		t.Fatalf("期望全部成功，实际 failedAt=%d err=%q", failedAt, errMsg)
 	}
 	if n := countProbe(t, ds); n != 2 {
 		t.Fatalf("期望提交 2 行，实际 %d", n)
-	}
-}
-
-// 预演必须回滚
-func TestRunStatementsDryRun(t *testing.T) {
-	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
-	prepareTable(t, ds)
-	defer func() {
-		if db, err := openDB(ds); err == nil {
-			_, _ = db.Exec("DROP TABLE IF EXISTS tx_probe")
-			db.Close()
-		}
-	}()
-
-	stmts := []string{"INSERT INTO tx_probe (id, v) VALUES (1, 'a')"}
-	if _, _, errMsg, _ := runStatements(ds, stmts, true); errMsg != "" {
-		t.Fatalf("预演不应报错: %s", errMsg)
-	}
-	if n := countProbe(t, ds); n != 0 {
-		t.Fatalf("预演后表应为空，实际 %d 行", n)
 	}
 }
 

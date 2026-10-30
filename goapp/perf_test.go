@@ -176,7 +176,7 @@ func TestPerfExecute(t *testing.T) {
 		  AND (a.ENDDATE IS NULL OR a.ENDDATE >= b.BEGNDATE)`)
 
 	t0 := time.Now()
-	_, failedAt, errMsg, _ := runStatements(ds, stmts, false)
+	_, failedAt, errMsg, _ := runStatements(ds, stmts)
 	if failedAt != -1 || errMsg != "" {
 		t.Fatalf("执行失败 failedAt=%d err=%s", failedAt, errMsg)
 	}

@@ -1104,7 +1104,7 @@
       <span class="sp"></span>
       <span class="hintline" id="modehint">顺序执行 · 任一失败即整体回滚</span>
       <button id="btnPre" class="primary" onclick="preflight()" disabled>数据预检</button>
-      <button id="btnRun" class="danger" onclick="run(false)" disabled>执行</button>
+      <button id="btnRun" class="danger" onclick="run()" disabled>执行</button>
     </div>
 
     <div class="ed">
@@ -2381,7 +2381,7 @@ function undoFormat() {
   $('btnUnfmt').disabled = true;
 }
 
-/* ================= 校验 / 预演 / 执行 ================= */
+/* ================= 校验 / 执行 ================= */
 async function preflight(silent, ownerSeq) {
   if (!CUR) { if (!silent) toast('先选一个脚本', 'bad'); return null; }
   if (!silent && busyBlocked()) return null;   // 正在执行/保存时不允许插一个预检
@@ -2562,7 +2562,7 @@ function renderCheck(r) {
   bindStmtJump();
 }
 
-async function run(dryRun) {
+async function run() {
   if (!CUR) return;
   if (busyBlocked()) return;          // 连点 / 已有一波在跑，只发一次
   const info = currentSqlInfo();
@@ -2593,28 +2593,26 @@ async function run(dryRun) {
     }
     const warnN = pf ? (pf.checks || []).filter(c => c.level === 'warn').length : 0;
 
-    if (!dryRun) {
-      const est = ((pf && pf.checks) || []).filter(c => c.title === '预计影响行数')
-        .map(c => `第 ${c.stmt + 1} 条：${esc(c.detail)}`).join('<br>');
-      const envBanner = (CUR_ENV === 'prod')
-        ? '<div style="margin-bottom:10px;padding:8px 10px;border-radius:6px;background:#2a1216;border:1px solid #5d2a30;color:#ffb0b6;font-size:12px">⚠ 这是<b>生产库</b>，执行后立即生效，确认无误再继续。</div>'
-        : '';
-      const body = envBanner + versionsHTML((pf && pf.versions) || []) +
-        `<div style="margin-top:12px;font-size:12px;color:#9aa6b8;line-height:1.8">
-           目标：${esc($('crumb').textContent)}<br>
-           ${sel ? '仅执行选中部分' : '执行全部'} · ${(pf && pf.count) || 0} 条语句
-           ${est ? '<br><span style="color:#e0a33a">' + est + '</span>' : ''}
-         </div>`;
-      const okGo = await confirmDialog('确认执行', body, '执行');
-      if (seq !== ACT_SEQ) return;
-      if (!okGo) { $('res').innerHTML = '<div class="rhead"><span class="chip">已取消</span></div>'; return; }
-    }
+    const est = ((pf && pf.checks) || []).filter(c => c.title === '预计影响行数')
+      .map(c => `第 ${c.stmt + 1} 条：${esc(c.detail)}`).join('<br>');
+    const envBanner = (CUR_ENV === 'prod')
+      ? '<div style="margin-bottom:10px;padding:8px 10px;border-radius:6px;background:#2a1216;border:1px solid #5d2a30;color:#ffb0b6;font-size:12px">⚠ 这是<b>生产库</b>，执行后立即生效，确认无误再继续。</div>'
+      : '';
+    const body = envBanner + versionsHTML((pf && pf.versions) || []) +
+      `<div style="margin-top:12px;font-size:12px;color:#9aa6b8;line-height:1.8">
+         目标：${esc($('crumb').textContent)}<br>
+         ${sel ? '仅执行选中部分' : '执行全部'} · ${(pf && pf.count) || 0} 条语句
+         ${est ? '<br><span style="color:#e0a33a">' + est + '</span>' : ''}
+       </div>`;
+    const okGo = await confirmDialog('确认执行', body, '执行');
+    if (seq !== ACT_SEQ) return;
+    if (!okGo) { $('res').innerHTML = '<div class="rhead"><span class="chip">已取消</span></div>'; return; }
 
     showBusy('执行中…');
-    const r = await postLong('/api/run', { scriptId: CUR, sql: text, dryRun, versions: (pf && pf.versions) || [] });
+    const r = await postLong('/api/run', { scriptId: CUR, sql: text, versions: (pf && pf.versions) || [] });
     if (seq !== ACT_SEQ) return;
     r.selOnly = info.selOnly;
-    safeRender(() => renderRun(r, dryRun, warnN, (pf && pf.versions) || []));
+    safeRender(() => renderRun(r, warnN, (pf && pf.versions) || []));
     toast(r.ok ? '执行完成' : '执行失败，看结果区', r.ok ? 'ok' : 'bad');
   } catch (e) {
     if (seq === ACT_SEQ) { showErr(e.message); toast(e.message, 'bad'); }
@@ -2661,7 +2659,7 @@ function rollbackClaim(errText, n) {
   return `前面的 ${n} 条改动全部回滚`;
 }
 
-function renderRun(r, dryRun, warnN, versions) {
+function renderRun(r, warnN, versions) {
   const results = r.results || {};
   const previews = r.previews || [];
   PREVIEWS = previews;
@@ -2671,7 +2669,7 @@ function renderRun(r, dryRun, warnN, versions) {
 
   let html = `<div class="rhead">
     <span class="badge ${ok ? 'ok' : 'bad'}">${ok ? '成功' : '失败'}</span>
-    <span class="chip">${dryRun ? '预演（已回滚）' : '执行'}</span>
+    <span class="chip">执行</span>
     <span class="chip">${count} 条语句</span>
     ${r.selOnly ? '<span class="chip" style="color:#e0a33a">仅选中部分</span>' : ''}
     <span class="chip">${r.ms || 0} ms</span>

@@ -89,7 +89,7 @@ func TestSmokeFullFlow(t *testing.T) {
 		}
 	}
 
-	if _, failedAt, errMsg, _ := runStatements(ds, stmts, false); errMsg != "" {
+	if _, failedAt, errMsg, _ := runStatements(ds, stmts); errMsg != "" {
 		t.Fatalf("执行失败于第 %d 条: %s", failedAt+1, errMsg)
 	}
 
@@ -115,7 +115,7 @@ func TestSmokeRollbackOnFailure(t *testing.T) {
 		`UPDATE smoke_t SET v='CHANGED' WHERE id=1`,
 		`INSERT INTO smoke_t VALUES (2,'dup',0)`, // 主键冲突
 	}
-	_, failedAt, errMsg, _ := runStatements(ds, stmts, false)
+	_, failedAt, errMsg, _ := runStatements(ds, stmts)
 	if errMsg == "" {
 		t.Fatal("主键冲突应该报错")
 	}
@@ -127,25 +127,6 @@ func TestSmokeRollbackOnFailure(t *testing.T) {
 	}
 	if got := smokeCount(t, ds); got != 3 {
 		t.Fatalf("回滚后行数应仍为 3，实际 %d", got)
-	}
-}
-
-func TestSmokeDryRun(t *testing.T) {
-	ds := smokeDS(t)
-	smokeSetup(t, ds)
-
-	stmts := []string{
-		`UPDATE smoke_t SET v='DRY' WHERE id=1`,
-		`DELETE FROM smoke_t WHERE id=2`,
-	}
-	if _, _, errMsg, _ := runStatements(ds, stmts, true); errMsg != "" {
-		t.Fatalf("演练不该报错: %s", errMsg)
-	}
-	if v, _, _ := smokeRow(t, ds, 1); v != "a" {
-		t.Fatalf("演练改了数据：id=1 = %q", v)
-	}
-	if got := smokeCount(t, ds); got != 3 {
-		t.Fatalf("演练后行数应仍为 3，实际 %d", got)
 	}
 }
 

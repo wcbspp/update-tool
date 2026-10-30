@@ -69,7 +69,7 @@ func TestExecAffectedAndCommit(t *testing.T) {
 		"UPDATE exec_probe SET v='c' WHERE id=2", // 真改 1 行
 		"DELETE FROM exec_probe WHERE id=1",      // 删 1 行
 	}
-	res, failedAt, errMsg, _ := runStatements(ds, stmts, false)
+	res, failedAt, errMsg, _ := runStatements(ds, stmts)
 	if failedAt != -1 || errMsg != "" {
 		t.Fatalf("应全部成功，实际 failedAt=%d err=%q", failedAt, errMsg)
 	}
@@ -84,20 +84,6 @@ func TestExecAffectedAndCommit(t *testing.T) {
 	}
 }
 
-// 预演只回滚，不留痕
-func TestExecDryRunLeavesNothing(t *testing.T) {
-	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
-	prepareExecTable(t, ds)
-
-	_, failedAt, errMsg, _ := runStatements(ds, []string{"INSERT INTO exec_probe (id, v) VALUES (9,'x')"}, true)
-	if failedAt != -1 || errMsg != "" {
-		t.Fatalf("预演不应报错，实际 %d %q", failedAt, errMsg)
-	}
-	if got := rowsOf(t, ds, "SELECT id, v FROM exec_probe"); len(got) != 0 {
-		t.Fatalf("预演后不应留数据，实际 %v", got)
-	}
-}
-
 // 超时按「每条语句」算：两条各 0.6 秒的语句，在 1 秒上限下都应通过
 func TestExecTimeoutIsPerStatement(t *testing.T) {
 	ds := dsFromEnv(t, "MYSQL_TEST_DSN")
@@ -105,7 +91,7 @@ func TestExecTimeoutIsPerStatement(t *testing.T) {
 
 	stmts := []string{"SELECT SLEEP(0.6)", "SELECT SLEEP(0.6)"}
 	t0 := time.Now()
-	_, failedAt, errMsg, _ := runStatements(ds, stmts, true)
+	_, failedAt, errMsg, _ := runStatements(ds, stmts)
 	if failedAt != -1 || errMsg != "" {
 		t.Fatalf("每条语句都应在 1 秒内完成，实际 failedAt=%d err=%q", failedAt, errMsg)
 	}

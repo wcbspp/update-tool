@@ -357,7 +357,11 @@ type ImportSummary struct {
 func planImport(cur Store, b ExportBundle, overwrite bool) (Store, ImportSummary, error) {
 	var sum ImportSummary
 	if b.Kind != exportKind && b.Kind != legacyExportKind {
-		return cur, sum, errors.New("这不是本程序的导出文件")
+		k := b.Kind
+		if k == "" {
+			k = "（空）"
+		}
+		return cur, sum, fmt.Errorf("这不是本程序的导出文件（文件里的类型是 %s）。请用「导出全部配置」重新导出", k)
 	}
 	if b.FormatVersion != 1 {
 		return cur, sum, fmt.Errorf("导出格式版本 %d 不认识，请升级程序", b.FormatVersion)

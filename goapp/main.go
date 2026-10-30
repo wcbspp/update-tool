@@ -898,7 +898,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.1.2"
+const appVersion = "1.1.3"
 
 type cell = any
 
@@ -4618,8 +4618,18 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		plain, err := openExport(raw)
 		if err != nil {
-			logImp(false, err.Error(), ImportSummary{})
-			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+			msg := err.Error()
+			// 说清楚到底哪一步不对：选错文件、旧版明文导出、还是文件损坏
+			switch {
+			case len(raw) > 0 && raw[0] == '{':
+				msg = "这个文件是明文 JSON，不是本程序的导出文件。请用「导出全部配置」生成 .mhd 再导入"
+			case len(raw) > 1 && raw[0] == 'P' && raw[1] == 'K':
+				msg = "这是一个 zip 压缩包，不是导出文件。请先解压，再导入里面程序导出的 .mhd"
+			default:
+				msg = "文件不是本程序的导出格式（" + msg + "）"
+			}
+			logImp(false, msg, ImportSummary{})
+			writeJSON(w, 400, map[string]any{"ok": false, "error": msg})
 			return
 		}
 		var bundle ExportBundle

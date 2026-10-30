@@ -3152,17 +3152,41 @@ function fileToB64(file) {
   });
 }
 
+// 导入相关的提示一律用常驻弹窗：toast 只有 3 秒，出错时用户根本看不清
+function showImportStatus(title, body, isErr) {
+  const d = $('dlg');
+  d.className = 'dlg';
+  d.innerHTML = `<h3>${esc(title)}</h3>
+    <div style="font-size:12.5px;line-height:1.8;white-space:pre-wrap;color:${isErr ? '#ff9a9a' : '#a9b8cc'}">${esc(body)}</div>
+    <div class="foot"><span class="l"></span><button id="impClose">关闭</button></div>`;
+  $('mask').classList.add('on');
+  $('impClose').onclick = () => $('mask').classList.remove('on');
+}
+
 async function onImportFile() {
   const f = $('impFile').files && $('impFile').files[0];
   if (!f) return;
-  if (f.size > 8 * 1024 * 1024) { toast('文件太大，不像是配置文件', 'bad'); return; }
-  toast('正在读取 ' + f.name + '（' + Math.round(f.size / 1024) + ' KB）', 'ok');
-  let b64;
-  try { b64 = await fileToB64(f); } catch (e) { toast('读不出来：' + e.message, 'bad'); return; }
+  if (f.size > 8 * 1024 * 1024) {
+    showImportStatus('导入配置文件', '文件太大（' + Math.round(f.size / 1024 / 1024) + ' MB），不像是配置文件。', true);
+    return;
+  }
+  showImportStatus('导入配置文件', '文件：' + f.name + '\n大小：' + Math.round(f.size / 1024) + ' KB\n\n正在读取并解析…', false);
 
-  let r;
-  try { r = await post('/api/import', { data: b64, mode: 'merge', preview: true }); }
-  catch (e) { toast(e.message, 'bad'); return; }
+  let b64, r;
+  try {
+    b64 = await fileToB64(f);
+  } catch (e) {
+    showImportStatus('导入失败', '文件读不出来：' + (e && e.message ? e.message : String(e)), true);
+    return;
+  }
+  try {
+    r = await post('/api/import', { data: b64, mode: 'merge', preview: true });
+  } catch (e) {
+    console.error('[import] preview failed', e);
+    showImportStatus('导入失败', '文件：' + f.name + '\n\n' + (e && e.message ? e.message : String(e))
+      + '\n\n常见原因：\n· 不是本程序导出的文件（要用「导出全部配置」生成的那种）\n· 文件在传输中被改动或截断\n· 程序版本太旧，先升级再导入', true);
+    return;
+  }
 
   const mode = await importDialog(r.summary || {}, b64);
   if (!mode) return;
@@ -3170,11 +3194,14 @@ async function onImportFile() {
     const res = await post('/api/import', { data: b64, mode });
     await loadTree();
     const s = res.summary || {};
-    toast(`已导入：新增 ${s.scripts || 0} 个脚本${s.updated ? '、覆盖 ' + s.updated + ' 个' : ''}、${s.groups || 0} 个文件夹、${s.addedDs || 0} 个连接`, 'ok');
-    if ((s.needPassword || []).length) {
-      setTimeout(() => toast('这些连接要自己补口令：' + s.needPassword.join('、'), 'bad'), 1700);
-    }
-  } catch (e) { toast(e.message, 'bad'); }
+    let msg = '新增 ' + (s.scripts || 0) + ' 个脚本、' + (s.groups || 0) + ' 个文件夹、' + (s.addedDs || 0) + ' 个连接';
+    if (s.updated) msg += '\n覆盖同名脚本 ' + s.updated + ' 个';
+    if ((s.needPassword || []).length) msg += '\n\n这些连接要自己补口令：' + s.needPassword.join('、');
+    showImportStatus('导入完成', msg, false);
+  } catch (e) {
+    console.error('[import] apply failed', e);
+    showImportStatus('导入失败', '文件：' + f.name + '\n\n' + (e && e.message ? e.message : String(e)), true);
+  }
 }
 
 async function openSettings() {

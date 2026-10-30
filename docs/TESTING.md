@@ -66,6 +66,7 @@ MYSQL_TEST_DSN=... go test -run 'TestSmoke' -v   # 端到端
 | 使用说明 | `GET /guide` | `TestAPIPages` |
 | 版本 / 检查更新 | `GET /api/update/check` | `TestAPIUpdateCheckShape`、`TestEffectiveUpdateURL` |
 | 代下载升级包 | `POST /api/update/fetch` | `TestAPIUpdateFetchRejectsBadName`、`TestAPIUpdateFetchRejectsShaMismatch`、`TestAPIUpdateFetchSucceeds`、`TestAPIUpdateFetchRejectsDowngrade` |
+| 跨库 / 非事务引擎 | `POST /api/run`（dry） | `TestWriteTargetRefsKeepsSchema`、`TestDryRunRejectsCrossSchemaMyISAM`（需 `MYSQL_TEST_DSN`） |
 | 导出 / 导入 | `POST /api/export`、`/api/import` | `TestAPIExportImport`、`TestPlanImport*`（9 个）、`TestBuildExportScopes` |
 | 新建 / 编辑数据源 | `POST /api/ds` | `TestAPIDatasourceCRUD`、`TestAPIDatasourcePortDefault` |
 | 测试连接 | `POST /api/ds/test` | `TestAPIDatasourceTest` |

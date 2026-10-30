@@ -52,6 +52,12 @@ func pfCtx(sec int) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), time.Duration(sec)*time.Second)
 }
 
+// metaCtx 给元数据查询一个硬上限。之前这些查询没有 ctx，
+// 最长会被连接的读超时（默认 1860 秒）卡住，期间“预检”忙碌锁一直被占着。
+func metaCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 20*time.Second)
+}
+
 // 编译时注入：-X main.buildTime=20261028-0245
 var buildTime = "dev"
 
@@ -1215,7 +1221,9 @@ func resolveTable(db *sql.DB, schema, name string) string {
 // 第二返回值表示「查到了真实表名」；查不到（超时/中间件限制）时不要缓存，下次重试
 func resolveTableOK(db *sql.DB, schema, name string) (string, bool) {
 	var actual string
-	err := db.QueryRow(`SELECT TABLE_NAME FROM information_schema.TABLES
+	ctx, cancel := metaCtx()
+	defer cancel()
+	err := db.QueryRowContext(ctx, `SELECT TABLE_NAME FROM information_schema.TABLES
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?) LIMIT 1`, schema, name).Scan(&actual)
 	if err == nil && actual != "" {
 		return actual, true
@@ -1761,7 +1769,9 @@ func showIndexRows(db *sql.DB, schema, t string) ([]showIdxRow, bool) {
 	if schema != "" {
 		qualified = quoteIdent(schema) + "." + qualified
 	}
-	rows, err := db.Query("SHOW INDEX FROM " + qualified)
+	ctx, cancel := metaCtx()
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SHOW INDEX FROM "+qualified)
 	if err != nil {
 		return nil, false
 	}
@@ -1865,7 +1875,9 @@ func keyColsViaShowIndex(db *sql.DB, schema, t string) ([]string, string) {
 func indexesOf(db *sql.DB, schema, t string) (map[string][]string, []string) {
 	out := map[string][]string{}
 	var order []string
-	rows, err := db.Query(`SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX
+	ctx, cancel := metaCtx()
+	defer cancel()
+	rows, err := db.QueryContext(ctx, `SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX
 		FROM information_schema.STATISTICS
 		WHERE UPPER(TABLE_SCHEMA)=UPPER(?) AND UPPER(TABLE_NAME)=UPPER(?)
 		ORDER BY INDEX_NAME, SEQ_IN_INDEX`, schema, t)

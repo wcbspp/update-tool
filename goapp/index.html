@@ -422,7 +422,12 @@
   .dot.partial{background:#e0a33a;box-shadow:0 0 0 2px rgba(224,163,58,.14);}
 
 
-  .badge.prod{color:#ffb0b6;border-color:#5d2a30;background:#2a1216;}
+  /* 生产 / 测试：一眼分得出来，避免在错误的库上执行。
+     带 data-key 的规则选择器优先级更高，这里必须写全，否则会被盖掉 */
+  .badge.prod,.node[data-key^="d"] .badge.prod{color:#ffe1e4;border-color:#a63a44;background:#5c1a21;font-weight:700;letter-spacing:.02em;}
+  .badge.test,.node[data-key^="d"] .badge.test{color:#c8f0d6;border-color:#2f6b45;background:#10301f;font-weight:600;letter-spacing:.02em;}
+  .badge.prod::before{content:'●';margin-right:3px;color:#ff6b78;font-size:8px;vertical-align:1px;}
+  .badge.test::before{content:'●';margin-right:3px;color:#4fd07d;font-size:8px;vertical-align:1px;}
 
 
   .badge.test{color:#a8c8ff;border-color:#24344d;background:#111a27;}
@@ -1950,6 +1955,7 @@ async function editDs(key) {
     if (pw) body['pass' + 'word'] = pw;
     return body;
   };
+  let savedDsId = '';
   const vals = await dialog({
     title: ds ? '编辑连接' : '新建数据源',
     fields: [
@@ -1979,7 +1985,7 @@ async function editDs(key) {
       return '';
     },
     // 真正落库放在窗口里：失败就不关窗，错误写在 #dlgMsg
-    onSubmit: async v => { await post('/api/ds', buildBody(v)); }
+    onSubmit: async v => { const r = await post('/api/ds', buildBody(v)); if (r && r.id) savedDsId = r.id; }
   });
   if (!vals) return;
   if (vals.__delete) {
@@ -1987,6 +1993,8 @@ async function editDs(key) {
     await loadTree(); toast('已删除', 'ok'); return;
   }
   await loadTree();
+  // 刚保存的那条连接状态还是旧的，立刻重探一次，不然会一直挂着红点
+  if (savedDsId) checkDs(savedDsId, true);
   toast(ds ? '已保存' : '已新增数据源', 'ok');
 }
 

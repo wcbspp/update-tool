@@ -23,6 +23,9 @@ func TestRunNamesNonTransactionalTablesOnFailure(t *testing.T) {
 		"INSERT INTO " + other + ".x_t VALUES (1, 1)",
 	} {
 		if _, err := db.Exec(st); err != nil {
+			if isPrivilegeErr(err) {
+				t.Skipf("该数据库不允许建库（%v），跨库用例无法准备", err)
+			}
 			t.Fatalf("准备失败(%s): %v", st, err)
 		}
 	}

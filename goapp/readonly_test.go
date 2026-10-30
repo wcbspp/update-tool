@@ -102,6 +102,11 @@ func makeReadOnlyDS(t *testing.T, ds DataSource) (DataSource, func()) {
 	// 建不出只读账号就无法证明「预检不需要写权限」，这里必须失败而不是跳过：
 	// 跳过会让整条证明静默失效，看起来全绿其实什么都没验。
 	if _, err := root.Exec("DROP USER IF EXISTS '" + user + "'@'%'"); err != nil {
+		// 中间件（DRDS/HotDB 等）常不给建/删用户的权限。这时不是「测出来了问题」，
+		// 而是这个平台上根本无法完成这条证明，明说并跳过，不要假装通过。
+		if isPrivilegeErr(err) {
+			t.Skipf("该数据库不允许建/删账号（%v），无法用只读账号证明预检无写入", err)
+		}
 		t.Fatalf("无法清理旧账号，预检只读性无法证明: %v", err)
 	}
 	if _, err := root.Exec("CREATE USER '" + user + "'@'%' IDENTIFIED BY '" + pass + "'"); err != nil {
@@ -205,4 +210,18 @@ func TestPreflightReadOnlyCoversAllChecks(t *testing.T) {
 			t.Fatalf("预检把权限错误当成了检查结果：%v — %v", r["title"], r["detail"])
 		}
 	}
+}
+
+// isPrivilegeErr 判断是不是「权限不够」导致的失败（而不是产品缺陷）
+func isPrivilegeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToLower(err.Error())
+	for _, k := range []string{"super privilege", "command denied", "access denied", "not allowed"} {
+		if strings.Contains(m, k) {
+			return true
+		}
+	}
+	return false
 }

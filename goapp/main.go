@@ -169,6 +169,7 @@ type Settings struct {
 	VerPfxs    string `json:"versionPrefixes"`
 	UpdateURL  string `json:"updateUrl"`  // 升级源地址
 	ListenMode string `json:"listenMode"` // local（默认，仅本机）| all（局域网）
+	AppName    string `json:"appName"`    // 界面顶部显示的名字；空表示用内置默认
 }
 
 type Store struct {
@@ -176,6 +177,24 @@ type Store struct {
 	Groups      []Group      `json:"groups"`
 	Scripts     []Script     `json:"scripts"`
 	Settings    Settings     `json:"settings"`
+}
+
+// 默认名字。开源版本改这一处即可换成中性名称，界面、日志、启动横幅都跟着变。
+const defaultAppName = "update-tool"
+
+// appNameOf: 优先用设置里的名字，其次环境变量 APP_NAME，最后回落到内置默认。
+// 名字只用于展示，长度限死避免撑坏顶栏。
+func appNameOf(s Store) string {
+	for _, cand := range []string{s.Settings.AppName, os.Getenv("APP_NAME")} {
+		if n := strings.TrimSpace(cand); n != "" {
+			r := []rune(n)
+			if len(r) > 40 {
+				r = r[:40]
+			}
+			return string(r)
+		}
+	}
+	return defaultAppName
 }
 
 func preflightEnabled(s Store) bool {
@@ -4024,8 +4043,9 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 		if seen[i] {
 			continue
 		}
+		// 这里不能截断：截到 60 字用户根本看不出是哪条语句要核对什么
 		add(i, "warn", "预检未覆盖",
-			fmt.Sprintf("这条语句（%s）工具暂时无法预检，请人工核对执行范围：%s", stmtKind(st), clipRunes(preview(st), 60)))
+			fmt.Sprintf("这条语句（%s）工具暂时无法预检，请人工核对执行范围：\n%s", stmtKind(st), preview(st)))
 	}
 	return out, versions, nil
 }
@@ -4622,13 +4642,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if lm == "" {
 			lm = "local"
 		}
-		writeJSON(w, 200, map[string]any{"preflight": preflightEnabled(st), "updateUrl": st.Settings.UpdateURL, "listenMode": lm})
+		writeJSON(w, 200, map[string]any{"preflight": preflightEnabled(st), "updateUrl": st.Settings.UpdateURL,
+			"listenMode": lm, "appName": appNameOf(st), "defaultAppName": defaultAppName})
 
 	case r.Method == http.MethodPost && p == "/api/settings":
 		var b struct {
 			Preflight  *bool   `json:"preflight"`
 			UpdateURL  *string `json:"updateUrl"`
 			ListenMode *string `json:"listenMode"`
+			AppName    *string `json:"appName"`
 		}
 		if err := readJSON(r, &b); err != nil {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
@@ -4641,6 +4663,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		if b.UpdateURL != nil {
 			st.Settings.UpdateURL = strings.TrimSpace(*b.UpdateURL)
+		}
+		if b.AppName != nil {
+			n := strings.TrimSpace(*b.AppName)
+			if r := []rune(n); len(r) > 40 {
+				r = r[:40]
+				n = string(r)
+			}
+			if n == defaultAppName {
+				n = "" // 跟默认一样就不落库，留空便于以后改默认值
+			}
+			st.Settings.AppName = n
 		}
 		restart := false
 		if b.ListenMode != nil {
@@ -4763,7 +4796,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			mode = "local"
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "version": appVersion, "build": buildTime,
-			"pid": os.Getpid(), "listenMode": mode, "host": os.Getenv("HOST"), "corrupt": storeCorrupt})
+			"pid": os.Getpid(), "listenMode": mode, "host": os.Getenv("HOST"),
+			"corrupt": storeCorrupt, "appName": appNameOf(stH)})
 
 	case r.Method == http.MethodPost && p == "/api/shutdown":
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -5859,8 +5893,11 @@ func main() {
 	}
 
 	addr := net.JoinHostPort(host, port)
+	mu.Lock()
+	stBoot := loadStore()
+	mu.Unlock()
 	fmt.Println()
-	fmt.Println("  update-tool v" + appVersion)
+	fmt.Println("  " + appNameOf(stBoot) + " v" + appVersion)
 	fmt.Printf("  本机   http://127.0.0.1:%s/\n", port)
 	if host == "0.0.0.0" {
 		for _, ip := range lanIPs() {

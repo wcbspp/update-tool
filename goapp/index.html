@@ -589,7 +589,6 @@
 /* ================= 结果区：可读性 + 可点击跳转 ================= */
 
 
-  .res.big{height:calc(100vh - 150px);}
 
 
   .sblock{cursor:pointer;border-left:2px solid transparent;transition:background .12s,border-color .12s;}
@@ -1076,7 +1075,7 @@ function busyBlocked() {
 }
 
 const RES_ACTIONS = '<span class="sp"></span>'
-  + '<button class="sm" onclick="toggleResBig()" title="放大 / 还原结果区">⤢</button>'
+  + '<button class="sm" onclick="openResultWindow()" title="在独立窗口打开结果（长结果更好看清、可整页搜索）">⤢</button>'
   + '<button class="sm" onclick="copyRes()">复制</button>';
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -2672,11 +2671,25 @@ function jumpToFirst(level) {
   if (!isNaN(st) && st >= 0) jumpToStmt(st);
 }
 
-function toggleResBig() {
-  const r = $('res');
-  r.classList.toggle('big');
-  const on = r.classList.contains('big');
-  toast(on ? '结果区已放大' : '结果区已还原', 'ok');
+// 原来只是把结果区撑高，长结果照样挤在页面布局里，还不能整页搜索。
+// 改成独立窗口：不受 .res 的高度约束，复制/查找都方便。
+function openResultWindow() {
+  const res = $('res');
+  const w = window.open('', '_blank', 'width=1000,height=780');
+  if (!w) { toast('浏览器拦截了弹出窗口，请允许后重试', 'bad'); return; }
+  // 带上本页样式，颜色和表格跟主界面一致
+  const css = [...document.querySelectorAll('style')].map(s => s.textContent).join('\n');
+  // 去掉所有内联事件：新窗口里没有主界面的函数，留着点了会报 ReferenceError
+  const body = res.innerHTML.replace(/\son[a-z]+="[^"]*"/gi, '');
+  w.document.open();
+  w.document.write('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+    + '<title>执行结果</title><style>' + css + '</style></head><body>'
+    + '<style>html,body{overflow:auto!important;height:auto!important;}'
+    + 'body{padding:14px;}'
+    + '.res{height:auto!important;overflow:visible!important;}'
+    + '.lwrap{max-height:none!important;}</style>'
+    + '<div class="res">' + body + '</div></body></html>');
+  w.document.close();
 }
 
 // 把原文里的字符区间映射到高亮层 DOM 并画一条可见色带
@@ -3077,8 +3090,12 @@ async function onImportFile() {
 }
 
 async function openSettings() {
-  let on = PREFLIGHT_ON, up = '', lm = 'local';
-  try { const r = await api('/api/settings'); on = !!r.preflight; up = r.updateUrl || ''; lm = r.listenMode || 'local'; } catch (e) {}
+  let on = PREFLIGHT_ON, up = '', lm = 'local', an = '', dan = '';
+  try {
+    const r = await api('/api/settings');
+    on = !!r.preflight; up = r.updateUrl || ''; lm = r.listenMode || 'local';
+    an = r.appName || ''; dan = r.defaultAppName || '';
+  } catch (e) {}
   const dlg = $('dlg');
   dlg.className = 'dlg';
   dlg.innerHTML = `<h3>设置</h3>
@@ -3088,6 +3105,11 @@ async function openSettings() {
     </label>
     <div style="font-size:12px;color:#a9b8cc;line-height:1.9;margin-top:6px">
       已有文件夹的设置不受影响，请点文件夹上的 ⚙ 单独设置。
+    </div>
+    <label>顶部显示的名称</label>
+    <input id="setName" value="${esc(an)}" maxlength="40" placeholder="${esc(dan)}">
+    <div style="font-size:12px;color:#a9b8cc;line-height:1.9;margin-top:6px">
+      留空用默认名称。开源或对外分发的版本可以在这里改成中性名字，界面标题、说明页和启动提示都会跟着变。
     </div>
     <label>升级源地址（可留空）</label>
     <input id="setUp" value="${esc(up)}" placeholder="https://example.com/medupdate-xxxx/">
@@ -3130,7 +3152,8 @@ async function openSettings() {
     const pick = document.querySelector('input[name="setListen"]:checked');
     const mode = pick ? pick.value : 'local';
     try {
-      const r = await post('/api/settings', { preflight: val, updateUrl: url, listenMode: mode });
+      const name = ($('setName') ? $('setName').value : '').trim();
+      const r = await post('/api/settings', { preflight: val, updateUrl: url, listenMode: mode, appName: name });
       PREFLIGHT_ON = val;
       if (r && r.needRestart) {
         close();
@@ -3315,6 +3338,11 @@ function initResizer() {
       const vtag = $('verTag');
       if (h.version) APP_VERSION = h.version;
       if (h.listenMode) LISTEN_MODE = h.listenMode;
+      if (h.appName) {
+        document.title = h.appName;
+        const h1 = document.querySelector('header h1');
+        if (h1) h1.textContent = h.appName;
+      }
       $('cfgBad').classList.toggle('on', !!h.corrupt);
       updateHealth();
       const vtxt = $('verText');

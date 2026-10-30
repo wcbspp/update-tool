@@ -165,12 +165,16 @@
     <p>工具能回滚“执行失败”，但回滚不了“条件写错”。更新前请先备份目标表，或确认已存在可用的备份。</p>
   </div>
 
-  <div class="tip">update-tool · 创意 by 吴美丽</div>
+  <div class="tip"><span id="gname">update-tool</span> · 创意 by 吴美丽</div>
 </div>
 <script>
   fetch('/api/health').then(r => r.json()).then(h => {
+    const name = (h && h.appName) ? h.appName : 'update-tool';
+    document.title = '使用说明 · ' + name;
     const el = document.getElementById('gver');
-    if (el && h && h.version) el.textContent = 'update-tool v' + h.version;
+    if (el && h && h.version) el.textContent = name + ' v' + h.version;
+    const gn = document.getElementById('gname');
+    if (gn) gn.textContent = name;
   }).catch(() => {});
 </script>
 </body>

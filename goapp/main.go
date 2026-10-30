@@ -3035,11 +3035,19 @@ func validateText(raw string) []map[string]any {
 			break
 		}
 	}
+	// 末行是注释时，用去掉注释后的最后一行判断，否则「-- 待确认,」会被当成 SQL 截断
+	lastCode := ""
+	for i := len(clean) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(clean[i]); t != "" {
+			lastCode = t
+			break
+		}
+	}
 	endsClean := strings.HasSuffix(lastRaw, "'") || strings.HasSuffix(lastRaw, `"`) ||
 		strings.HasSuffix(lastRaw, "`") || strings.HasSuffix(lastRaw, ")")
-	if lastRaw != "" && !endsClean {
-		low := strings.ToLower(lastRaw)
-		if strings.HasSuffix(lastRaw, ",") || strings.HasSuffix(lastRaw, "=") ||
+	if lastCode != "" && !endsClean {
+		low := strings.ToLower(lastCode)
+		if strings.HasSuffix(lastCode, ",") || strings.HasSuffix(lastCode, "=") ||
 			strings.HasSuffix(low, " and") || strings.HasSuffix(low, " or") {
 			add("error", "语句疑似不完整", "最后一行以 "+lastRaw[len(lastRaw)-1:]+" 结尾，像是没写完")
 		}
@@ -4068,9 +4076,6 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					sch, nm := tblSchemaOf(schema, firstIdent(part))
 					real := mResolveTable(db, sch, normTable(nm))
 					refs = append(refs, tblRef{sch, real, a})
-					if !strings.EqualFold(sch, schema) {
-						noteWrite(sch, real)
-					}
 				}
 			}
 			if len(refs) < 2 {
@@ -4085,7 +4090,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 						}
 					}
 					for _, col := range unqual {
-						if !mHasColumn(db, schema, r.table, col) {
+						if !mHasColumn(db, tblSchemaOr(r.schema, schema), r.table, col) {
 							add(i, "error", "SET 列不存在", fmt.Sprintf("要更新的列 %s 在 %s 里找不到", col, r.table))
 						}
 					}
@@ -4138,7 +4143,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					lim := deleteLimit(st)
 					add(i, "warn", "没有 WHERE 条件", fmt.Sprintf("这条 UPDATE 没有 WHERE，按 LIMIT %d 最多改 %d 行，请确认不是笔误", lim, lim))
 				case hasJoin:
-					add(i, "warn", "没有 WHERE 条件", "这条 UPDATE 没有 WHERE，范围由 JOIN 的 ON 条件决定，请确认不是笔误")
+					add(i, "error", "没有 WHERE 条件", "这条 UPDATE 没有 WHERE，JOIN 的 ON 只是关联条件，不代表范围；确实要按关联改全表请显式写 WHERE 1=1")
 				default:
 					add(i, "error", "没有 WHERE 条件", "这条 UPDATE 会更新整张表，请确认不是笔误（确实要全表更新请改成 WHERE 1=1 再跑）")
 				}
@@ -4149,7 +4154,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					if !updated[strings.ToLower(r.alias)] {
 						continue
 					}
-					if mHasColumn(db, schema, r.table, col) {
+					if mHasColumn(db, tblSchemaOr(r.schema, schema), r.table, col) {
 						hit = true
 						break
 					}
@@ -4166,8 +4171,19 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 					continue
 				}
 				// 多表 UPDATE 可能同时写多张表，每张都要登记，
-				// 否则第二张表的引擎检查/重叠判断会被漏掉
-				targetUse[tblKey(ref.schema, schema, ref.table)] = append(targetUse[tblKey(ref.schema, schema, ref.table)], stmtTarget{stmt: i, where: whereRaw(st), alias: ref.alias, multi: true})
+				// 否则第二张表的引擎检查/重叠判断会被漏掉。
+				// 自连接（UPDATE t a JOIN t b ...）会命中同一个键，按语句去重。
+				k := tblKey(ref.schema, schema, ref.table)
+				dup := false
+				for _, u := range targetUse[k] {
+					if u.stmt == i {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					targetUse[k] = append(targetUse[k], stmtTarget{stmt: i, where: whereRaw(st), alias: ref.alias, multi: true})
+				}
 				if targetTable == "" {
 					targetTable = ref.table
 					targetAlias = ref.alias
@@ -4177,7 +4193,7 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 				// SET 没写别名、列名也没法归属：分不清写哪张表，
 				// 只能把参与的表都当「可能被写」，交给引擎检查降级提醒
 				for _, ref := range refs {
-					unsureRefs = append(unsureRefs, tableRef{schema, ref.table})
+					unsureRefs = append(unsureRefs, tableRef{tblSchemaOr(ref.schema, schema), ref.table})
 				}
 			}
 			// 行数估算与各源表行数互不依赖，收集起来和整段脚本的其它语句一起并发跑
@@ -4200,7 +4216,10 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			switch {
 			case reDeleteUsing.MatchString(st):
 				mm := reDeleteUsing.FindStringSubmatch(st)
-				targets = append(targets, mResolveTable(db, schema, normTable(mm[1])))
+				sch, nm := tblSchemaOf(schema, mm[1])
+				real := mResolveTable(db, sch, normTable(nm))
+				targets = append(targets, real)
+				countSchema = sch
 				multi = true // USING 的 WHERE 通常引用关联表，单表计数必然失败，走 EXPLAIN
 				multiDelete = true
 			case reDeleteSingle.MatchString(st), reDelete.MatchString(st) && !reDeleteMulti.MatchString(st):
@@ -4935,16 +4954,13 @@ func findUnsafeStatement(stmts []string) (int, string, bool) {
 		if kind == "update" {
 			// 多表 UPDATE 用 JOIN ... ON 限定行，没有顶层 WHERE 不等于整表改写。
 			// 只看 SET 之前的表段：子查询里的 JOIN 不代表这行有范围限制。
-			// 与预检保持一致：JOIN 写法给 warn（范围由 ON 条件决定），不直接拦。
+			// 与预检保持一致：JOIN 的 ON 只是关联条件，不代表范围；
+			// 没有 WHERE 一律拦，确实要按关联改全表请显式写 WHERE 1=1。
 			limited := false
 			if deleteLimit(plain) > 0 {
 				limited = true
 			}
-			if tablesPart, _, okUpd := splitUpdate(plain); okUpd {
-				if j, _ := indexTopLevelWord(strings.ToUpper(stripSQLComments(tablesPart)), "join"); j >= 0 {
-					limited = true
-				}
-			}
+
 			if whereTail(plain) == "" && !limited {
 				return idx + 1, "这条 UPDATE 没识别到 WHERE 条件；如果确实要改全表，请写成 WHERE 1=1 明确表达", true
 			}

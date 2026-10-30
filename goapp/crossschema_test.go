@@ -148,3 +148,46 @@ func TestFindAutocommitStmt(t *testing.T) {
 		}
 	}
 }
+
+// autocommit 的等价写法：SET 后没空格、混写用户变量、带注释
+func TestFindAutocommitStmtVariants(t *testing.T) {
+	bad := []string{
+		"SET@@autocommit=1",
+		"SET @x=1,@@session.autocommit=1",
+		"SET @@session.autocommit = 1",
+		"SET /*c*/ autocommit=1",
+		"SET @@autocommit:=1",
+	}
+	for _, s := range bad {
+		if len(findAutocommitStmt([]string{s})) != 1 {
+			t.Fatalf("应识别为改 autocommit：%q", s)
+		}
+	}
+	ok := []string{
+		"SET @old=@@autocommit",
+		"SET @autocommit=1",
+		"SET @x='autocommit=1'",
+	}
+	for _, s := range ok {
+		if len(findAutocommitStmt([]string{s})) != 0 {
+			t.Fatalf("不应拦截：%q", s)
+		}
+	}
+}
+
+// 结尾是字符串/括号的语句不该被判成「没写完」；末行是注释也不该误报
+func TestValidateTextNoFalseTruncation(t *testing.T) {
+	cases := []string{
+		"UPDATE t SET v='x' WHERE v='a'",
+		"UPDATE t SET v='x' WHERE id IN (1,2)",
+		"UPDATE t SET v=1 WHERE id=1;\n-- 待确认,",
+		"UPDATE t SET v=1 WHERE id=1;\n-- 注意 and",
+	}
+	for _, c := range cases {
+		for _, chk := range validateText(c) {
+			if chk["level"] == "error" && chk["title"] == "语句疑似不完整" {
+				t.Fatalf("不该报截断：%q -> %v", c, chk)
+			}
+		}
+	}
+}

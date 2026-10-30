@@ -2419,7 +2419,7 @@ async function check() {
   BUSY = 'check'; sync();
   try {
     showBusy('语法校验中（EXPLAIN，不改数据）…');
-    const r = await postLong('/api/check', { scriptId: CUR, sql: text });
+    const r = await postLong('/api/check', { scriptId: CUR, sql: text, selOnly: info.selOnly });
     if (seq !== ACT_SEQ) return;
     safeRender(() => renderCheck(r));
     toast(r.ok ? '语法校验通过' : '语法校验发现问题', r.ok ? 'ok' : 'bad');
@@ -2436,6 +2436,7 @@ function renderCheck(r) {
     <span class="badge ${r.ok ? 'ok' : 'bad'}">${r.ok ? '通过' : '有问题'}</span>
     <span class="chip">语法校验 · EXPLAIN</span>
     <span class="chip">${r.count || list.length} 条语句</span>
+    <span class="chip" title="本次校验的文本范围">${r.selOnly ? '仅选中片段' : '整段'} · ${r.chars || 0} 字符</span>
     <span class="chip" title="校验耗时">${r.ms != null ? r.ms + ' ms' : '—'}</span>
     ${bad ? `<span class="chip" style="color:#ff9a9a">${bad} 条失败</span>` : ''}
     ${RES_ACTIONS}
@@ -3184,7 +3185,8 @@ async function loadLogs() {
   if (logFilter.dry) qs.set('dry', logFilter.dry);
   try {
     const r = await api('/api/logs?' + qs.toString());
-    LOGS = r.logs || [];
+    // 选了「仅预演/仅执行」就不该混进语法校验记录
+    LOGS = (r.logs || []).filter(l => !logFilter.dry || l.type !== 'check');
     renderLogs();
   } catch (e) {
     $('lwrap').innerHTML = `<div style="padding:14px;color:#ff9a9a">${esc(e.message)}</div>`;
@@ -3195,7 +3197,7 @@ function renderLogs() {
   $('lwrap').innerHTML = LOGS.map((l, i) => {
     const t = new Date(l.ts);
     const time = t.toLocaleString('zh-CN', { hour12: false });
-    const mode = l.type === 'preflight' ? '预检' : (l.dryRun ? '预演' : '执行');
+    const mode = l.type === 'preflight' ? '预检' : (l.type === 'check' ? '语法校验' : (l.dryRun ? '预演' : '执行'));
     return `<div class="lrow" onclick="toggleLog(${i})">
         <span class="t">${time}</span>
         <span class="s" title="${esc(l.script || '')}">${esc(l.script || '-')}</span>
@@ -3217,8 +3219,14 @@ function logVersion(l) {
 function logDetail(l) {
   const lines = [];
   lines.push(`数据源：${l.ds || '-'}    库：${l.database || '-'}`);
-  lines.push(`时间：${l.ts}    模式：${l.dryRun ? '预演' : '执行'}    耗时：${l.ms}ms    语句：${l.stmts} 条`);
-  lines.push(`影响行数：${l.affected || 0}    数据版本：${logVersion(l) || '-'}`);
+  if (l.type === 'check') {
+    // 语法校验没有影响行数，别硬套执行的字段
+    lines.push(`时间：${l.ts}    模式：语法校验    耗时：${l.ms}ms    语句：${l.stmts} 条`);
+    lines.push(`校验范围：${l.selOnly ? '仅选中片段' : '整段'}    结果：${l.ok ? '通过' : '有问题'}`);
+  } else {
+    lines.push(`时间：${l.ts}    模式：${l.dryRun ? '预演' : '执行'}    耗时：${l.ms}ms    语句：${l.stmts} 条`);
+    lines.push(`影响行数：${l.affected || 0}    数据版本：${logVersion(l) || '-'}`);
+  }
   if (l.type === 'preflight') lines.push(`类型：预检（只读）    错误 ${l.errCount || 0} 项    提醒 ${l.warnCount || 0} 项`);
   if (l.failedAt != null && l.failedAt >= 0) lines.push(`失败位置：第 ${l.failedAt + 1} 条`);
   if (l.error) lines.push(`错误：${l.error}`);

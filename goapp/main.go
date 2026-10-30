@@ -5426,6 +5426,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		var b struct {
 			ScriptID string `json:"scriptId"`
 			SQL      string `json:"sql"`
+			SelOnly  bool   `json:"selOnly"` // 只校验了选中的片段
 		}
 		if err := readJSON(r, &b); err != nil {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
@@ -5463,8 +5464,32 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		for i, st := range stmts {
 			previews[i] = preview(st)
 		}
+		// 语法校验原来不记录，用户遇到「刚才明明失败」就无从查证。这里补一条。
+		failedAt, firstErr := -1, ""
+		for _, rr := range results {
+			if v, _ := rr["ok"].(bool); !v {
+				if idx, ok := rr["i"].(int); ok {
+					failedAt = idx
+				}
+				if msg, ok := rr["error"].(string); ok {
+					firstErr = msg
+				}
+				break
+			}
+		}
+		if len([]rune(firstErr)) > 600 {
+			firstErr = string([]rune(firstErr)[:600])
+		}
+		_ = appendLog(map[string]any{
+			"ts": time.Now().Format(time.RFC3339), "type": "check",
+			"script": sc.Name, "ds": ds.Name, "database": ds.Database,
+			"dryRun": false, "stmts": len(stmts), "ok": allOK,
+			"ms": time.Since(chkStart).Milliseconds(), "failedAt": failedAt,
+			"error": firstErr, "selOnly": b.SelOnly,
+		})
 		writeJSON(w, 200, map[string]any{"ok": allOK, "results": results, "count": len(stmts),
-			"previews": previews, "ms": time.Since(chkStart).Milliseconds()})
+			"previews": previews, "ms": time.Since(chkStart).Milliseconds(),
+			"selOnly": b.SelOnly, "chars": len([]rune(text))})
 
 	case r.Method == http.MethodPost && p == "/api/run":
 		doneBusy, okBusy := tryBeginBusy("执行")

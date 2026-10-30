@@ -7,7 +7,7 @@
 <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png">
 <meta name="theme-color" content="#0b1220">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>update-tool</title>
+<title>SQL 执行台</title>
 <style>
   *{box-sizing:border-box;}
 
@@ -890,7 +890,13 @@
   .radioRow{display:flex;flex-direction:column;gap:6px;margin-top:4px;}
 
 
-  .radioOpt{display:flex;align-items:baseline;gap:8px;padding:7px 10px;border:1px solid #24334a;border-radius:7px;background:#0f1724;cursor:pointer;font-size:12.5px;color:#d6e2f2;}
+  .radioOpt{display:grid;grid-template-columns:auto 1fr;column-gap:8px;row-gap:1px;align-items:center;padding:7px 10px;border:1px solid #24334a;border-radius:7px;background:#0f1724;cursor:pointer;font-size:12.5px;color:#d6e2f2;}
+
+  .radioOpt input{grid-row:1 / span 2;}
+
+  .radioOpt span{grid-column:2;}
+
+  .radioOpt em{grid-column:2;}
 
 
   .radioOpt em{font-style:normal;color:#8b9bb0;font-size:11.5px;}
@@ -920,6 +926,8 @@
   .checkRow input{width:auto;margin:3px 0 0;flex:0 0 auto;}
 
   .checkRow span{font-size:12.5px;line-height:1.5;}
+
+  .setNote{font-size:11.5px;color:#8b9bb0;line-height:1.6;margin:4px 0 2px;}
 
   .cfgBad{position:fixed;left:0;right:0;bottom:0;z-index:70;display:none;align-items:center;gap:10px;padding:9px 14px;background:#3a1418;border-top:1px solid #7a2b34;color:#ffc2c8;font-size:12.5px;line-height:1.55;box-shadow:0 -8px 24px -14px #000;}
 
@@ -980,7 +988,7 @@
 <body>
 <header>
   <div class="brand">
-    <h1>update-tool</h1>
+    <h1>SQL 执行台</h1>
     <span class="verPill" id="verTag" title="点击查看版本信息" style="visibility:hidden"><span id="verText"></span><span class="upd-dot" id="updDot" style="display:none"></span><button class="ghBtn" id="ghBtn" title="关于与版本" aria-label="关于与版本"><svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></button></span>
   </div>
   <span class="who" id="who"></span>
@@ -3103,19 +3111,13 @@ async function openSettings() {
       <input id="setPf" type="checkbox" ${on ? 'checked' : ''} style="width:auto;margin-top:3px">
       <span>新建文件夹时默认开启「执行前数据预检」</span>
     </label>
-    <div style="font-size:12px;color:#a9b8cc;line-height:1.9;margin-top:6px">
-      已有文件夹的设置不受影响，请点文件夹上的 ⚙ 单独设置。
-    </div>
+    <div class="setNote">已有文件夹不受影响，各自在 ⚙ 里单独设置。</div>
     <label>顶部显示的名称</label>
     <input id="setName" value="${esc(an)}" maxlength="40" placeholder="${esc(dan)}">
-    <div style="font-size:12px;color:#a9b8cc;line-height:1.9;margin-top:6px">
-      留空用默认名称。开源或对外分发的版本可以在这里改成中性名字，界面标题、说明页和启动提示都会跟着变。
-    </div>
+    <div class="setNote">留空用默认名（${esc(dan)}）。</div>
     <label>升级源地址（可留空）</label>
     <input id="setUp" value="${esc(up)}" placeholder="https://example.com/medupdate-xxxx/">
-    <div style="font-size:12px;color:#a9b8cc;line-height:1.9;margin-top:6px">
-      填了之后启动时会读该地址下的 version.json 检查新版本；只读取清单，不改数据。
-    </div>
+    <div class="setNote">只读 version.json 查新版本，不改数据。</div>
     <label>访问范围</label>
     <div class="radioRow">
       <label class="radioOpt"><input type="radio" name="setListen" value="local" ${lm !== 'all' ? 'checked' : ''}>
@@ -3123,15 +3125,13 @@ async function openSettings() {
       <label class="radioOpt"><input type="radio" name="setListen" value="all" ${lm === 'all' ? 'checked' : ''}>
         <span>允许局域网访问</span><em>同网段任何人都能打开并执行脚本</em></label>
     </div>
-    <div class="hintBox">本工具没有登录验证。开启局域网访问前，请确认网络环境可信。修改后程序会自动重启（约 2 秒）。</div>
-    <div class="hintBox">配置保存在程序同目录的 <b>data.json</b>，数据库口令写进去之前会先加密，用文本编辑器或云盘都看不出内容。
-      但它不算真正的保密：拿到这个程序的人仍能解开。文件权限 600，请不要把它和程序一起发给不相干的人。</div>
+    <div class="hintBox">没有登录验证。开启局域网前请确认网络可信；修改监听范围会自动重启。</div>
     <label>配置备份</label>
     <div class="btnRow">
       <button id="setExp">导出全部配置</button>
       <button id="setImp">导入配置…</button>
     </div>
-    <div class="hintBox">导出文件是加密的，只能本程序导入。与同事共用时可选择是否带上数据库口令。</div>
+    <div class="hintBox"><b>data.json</b> 里的口令已加密，但拿到程序的人仍能解开——别把程序和它一起发给不相干的人。导出文件同样加密，只能本程序导入。</div>
     <div class="repoBox"><span class="repoLbl">仓库</span>
       <a href="${REPO_URL}" target="_blank" rel="noopener">${esc(REPO_URL.replace('https://github.com/', ''))} ↗</a></div>
     <div class="foot">

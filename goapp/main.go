@@ -2283,17 +2283,19 @@ func splitUpdate(st string) (string, string, bool) {
 	if len(t) < 6 || !strings.EqualFold(t[:6], "update") {
 		return "", "", false
 	}
-	k := indexTopLevelPhrase(t, " set ")
+	k, kEnd := indexTopLevelWord(t, "set")
 	if k < 0 {
 		return "", "", false
 	}
-	tables := strings.TrimSpace(t[len("update"):k])
+	// 表名部分要去掉注释：SET 已经定位在真实关键字上，但这一段里可能夹着注释，
+	// 留着会让下游拆表读到注释文本
+	tables := strings.TrimSpace(stripSQLComments(t[len("update"):k]))
 	for _, mod := range []string{"low_priority", "ignore"} {
 		for strings.HasPrefix(strings.ToLower(tables), mod) {
 			tables = strings.TrimSpace(tables[len(mod):])
 		}
 	}
-	return tables, strings.TrimSpace(t[k+len(" set "):]), true
+	return tables, strings.TrimSpace(t[kEnd:]), true
 }
 
 // 每个字节位置的括号深度（引号里的括号不算）
@@ -2782,6 +2784,91 @@ func trxWarnings(db *sql.DB, schema string, pfSec int) []map[string]any {
 // 解析 INSERT ... VALUES 的常量元组（返回每个括号组里的顶层值文本）
 
 // 按顶层逗号切值，字符串和括号里的逗号不算
+
+// indexTopLevelWord: 在括号/引号之外找独立单词（前后必须是空白或首尾，含换行）。
+// 不能用 " set " 这种字面量：脚本里 SET 常另起一行，前面是换行不是空格。
+func indexTopLevelWord(s, word string) (int, int) {
+	low := strings.ToLower(s)
+	lw := strings.ToLower(word)
+	depth := 0
+	inS, inD, inBt := false, false, false
+	isWS := func(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
+	for i := 0; i < len(low); i++ {
+		c := low[i]
+		if inS {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '\'' {
+				inS = false
+			}
+			continue
+		}
+		if inD {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inD = false
+			}
+			continue
+		}
+		if inBt {
+			if c == '`' {
+				inBt = false
+			}
+			continue
+		}
+		// 注释里的 set 不是关键字：-- 与 # 到行尾，/* */ 到结束
+		if c == '-' && i+1 < len(low) && low[i+1] == '-' &&
+			(i+2 >= len(low) || isWS(low[i+2])) {
+			for i < len(low) && low[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '#' {
+			for i < len(low) && low[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(low) && low[i+1] == '*' {
+			end := strings.Index(low[i+2:], "*/")
+			if end < 0 {
+				return -1, -1
+			}
+			i += 2 + end + 1
+			continue
+		}
+		switch c {
+		case '\'':
+			inS = true
+		case '"':
+			inD = true
+		case '`':
+			inBt = true
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 && strings.HasPrefix(low[i:], lw) {
+				end := i + len(lw)
+				before := i == 0 || isWS(low[i-1])
+				after := end >= len(low) || isWS(low[end])
+				if before && after {
+					return i, end
+				}
+			}
+		}
+	}
+	return -1, -1
+}
 
 // 只在括号外、引号外查找短语，避免把字符串里的内容当成语法
 func indexTopLevelPhrase(s, phrase string) int {

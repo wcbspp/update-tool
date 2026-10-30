@@ -1082,7 +1082,7 @@
 <div class="cfgBad" id="cfgBad"><b>配置文件读不出来</b>
   <span>data.json 可能已损坏。为了不把原文件盖成空的，现在已进入只读保护：列表显示为空，但你的文件没被改动，也存不了新东西。请从备份恢复这个文件。</span>
   <button class="sm" onclick="this.parentNode.classList.remove('on')">知道了</button></div>
-<input type="file" id="impFile" accept=".mhd,application/octet-stream" style="display:none">
+<input type="file" id="impFile" accept=".mhd,.json,.zip,application/octet-stream,application/json" style="display:none">
 
 <script>
 const $ = id => document.getElementById(id);
@@ -3156,6 +3156,7 @@ async function onImportFile() {
   const f = $('impFile').files && $('impFile').files[0];
   if (!f) return;
   if (f.size > 8 * 1024 * 1024) { toast('文件太大，不像是配置文件', 'bad'); return; }
+  toast('正在读取 ' + f.name + '（' + Math.round(f.size / 1024) + ' KB）', 'ok');
   let b64;
   try { b64 = await fileToB64(f); } catch (e) { toast('读不出来：' + e.message, 'bad'); return; }
 
@@ -3299,7 +3300,11 @@ function renderLogs() {
   $('lwrap').innerHTML = LOGS.map((l, i) => {
     const t = new Date(l.ts);
     const time = t.toLocaleString('zh-CN', { hour12: false });
-    const mode = l.type === 'preflight' ? '预检' : (l.type === 'check' ? '语法校验' : (l.dryRun ? '预演' : '执行'));
+    const mode = l.type === 'preflight' ? '预检'
+      : l.type === 'check' ? '语法校验'
+      : l.type === 'import' ? '导入'
+      : l.type === 'export' ? '导出'
+      : (l.dryRun ? '预演' : '执行');
     return `<div class="lrow" onclick="toggleLog(${i})">
         <span class="t">${time}</span>
         <span class="s" title="${esc(l.script || '')}">${esc(l.script || '-')}</span>

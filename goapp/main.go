@@ -4571,6 +4571,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		_ = appendLog(map[string]any{
+			"ts": time.Now().Format(time.RFC3339), "type": "export",
+			"script": "", "ds": "", "database": "", "dryRun": false,
+			"stmts": len(bundle.Scripts), "ok": true, "ms": 0,
+			"affected": len(bundle.Scripts), "failedAt": -1, "error": "",
+		})
 		writeJSON(w, 200, map[string]any{
 			"ok":       true,
 			"filename": fmt.Sprintf("update-tool-%s-%s.mhd", req.Scope, time.Now().Format("20060102-1504")),
@@ -4592,18 +4598,33 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		// 导入/导出原来不落日志，用户在 Windows 上失败后无从排查；这里补上
+		logImp := func(ok bool, msg string, sum ImportSummary) {
+			if req.Preview {
+				return // 预览是只读试探，不记流水
+			}
+			_ = appendLog(map[string]any{
+				"ts": time.Now().Format(time.RFC3339), "type": "import",
+				"script": "", "ds": "", "database": "", "dryRun": false,
+				"stmts": sum.Scripts + sum.Groups + sum.AddedDS, "ok": ok, "ms": 0,
+				"affected": sum.Updated, "failedAt": -1, "error": msg,
+			})
+		}
 		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(req.Data))
 		if err != nil {
+			logImp(false, "文件内容读不出来（可能选错了文件）", ImportSummary{})
 			writeJSON(w, 400, map[string]any{"ok": false, "error": "文件内容读不出来，可能选错了文件"})
 			return
 		}
 		plain, err := openExport(raw)
 		if err != nil {
+			logImp(false, err.Error(), ImportSummary{})
 			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
 		var bundle ExportBundle
 		if err := json.Unmarshal(plain, &bundle); err != nil {
+			logImp(false, "导出文件内容解析失败", ImportSummary{})
 			writeJSON(w, 400, map[string]any{"ok": false, "error": "导出文件内容解析失败"})
 			return
 		}
@@ -4613,6 +4634,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		next, sum, err := planImport(st, bundle, req.Mode == "overwrite")
 		if err != nil {
 			mu.Unlock()
+			logImp(false, err.Error(), sum)
 			writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -4628,10 +4650,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := saveStore(next); err != nil {
 			mu.Unlock()
+			logImp(false, err.Error(), sum)
 			saveFailed(w, err)
 			return
 		}
 		mu.Unlock()
+		logImp(true, "", sum)
 		writeJSON(w, 200, map[string]any{"ok": true, "summary": sum, "tree": buildTree(next)})
 
 	case r.Method == http.MethodGet && p == "/api/settings":

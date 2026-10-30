@@ -950,6 +950,78 @@ type stmtResult struct {
 	MS         int64    `json:"ms"`
 }
 
+// writeTargetRefs 取「会被写到的表」，只给执行前的事务引擎兜底检查用。
+// 解析不出来的语句直接跳过：这里宁可不拦，也不猜错表。
+func writeTargetRefs(stmts []string, schema string) []tableRef {
+	out := make([]tableRef, 0, len(stmts))
+	seen := map[string]bool{}
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		sch, nm := schema, normTable(raw)
+		if s, n, ok := splitSchemaQualified(raw); ok {
+			sch, nm = s, normTable(n)
+		}
+		if nm == "" {
+			return
+		}
+		k := strings.ToUpper(sch) + "." + strings.ToUpper(nm)
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, tableRef{sch, nm})
+	}
+	for _, st := range stmts {
+		switch stmtKind(st) {
+		case "insert":
+			if m := reInsert.FindStringSubmatch(st); m != nil {
+				add(m[1])
+			}
+		case "update":
+			if tables, _, ok := splitUpdate(st); ok {
+				for _, part := range splitTopLevel(tables) {
+					// 直接取原样的首个标识符：parseTableRef 会把库名剥掉，
+					// 这里要的恰好是带库名的原始写法。
+					if fs := strings.Fields(strings.TrimSpace(part)); len(fs) > 0 {
+						add(fs[0])
+					}
+				}
+			}
+		case "delete":
+			if m := reDelete.FindStringSubmatch(st); m != nil {
+				add(m[1])
+			}
+		}
+	}
+	return out
+}
+
+// nonTransactionalTables 返回不是 InnoDB 的目标表。
+// 读不到元数据（权限不够、DRDS 不认 information_schema）时当「无法判定」跳过，
+// 与预检里 engineWarnings 的降级口径一致。
+func nonTransactionalTables(db *sql.DB, refs []tableRef, sec int) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	ctx, cancel := pfCtx(sec)
+	defer cancel()
+	bad := make([]string, 0, len(refs))
+	for _, r := range refs {
+		var eng sql.NullString
+		err := db.QueryRowContext(ctx, "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", r.schema, r.name).Scan(&eng)
+		if err != nil || !eng.Valid || eng.String == "" {
+			continue
+		}
+		if !strings.EqualFold(eng.String, "InnoDB") {
+			bad = append(bad, r.schema+"."+r.name+"（"+eng.String+"）")
+		}
+	}
+	return bad
+}
+
 func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResult, int, string, int64) {
 	start := time.Now()
 	res := map[string]stmtResult{}
@@ -960,6 +1032,13 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 	defer db.Close()
 	// 执行阶段取消 DQL 的统计上限，DML 用 context 单独限时
 	_, _ = db.Exec("SET SESSION max_execution_time = 0")
+
+	// 非事务引擎上 rollback 什么也回滚不了。预演必须拒绝，
+	// 否则界面会说「已回滚」，而数据其实已经落盘。
+	badEng := nonTransactionalTables(db, writeTargetRefs(stmts, ds.Database), 20)
+	if dry && len(badEng) > 0 {
+		return res, -1, "这些表不是事务引擎，预演无法回滚，已拒绝：" + strings.Join(badEng, "、"), time.Since(start).Milliseconds()
+	}
 
 	// 超时按「每条语句」算：整段共用一个上下文时，一条慢语句会把
 	// 前面已经成功的语句一起拖到超时，用户看到的是整批回滚。
@@ -989,6 +1068,9 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 		// 回滚本身失败时，绝不能告诉用户「已回滚」——那会让人放心重跑，数据被改两遍
 		if rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			msg = "回滚可能未完成（" + rbErr.Error() + "）。请先人工核对前 " + strconv.Itoa(i) + " 条语句的影响，不要直接重跑。原始错误：" + msg
+		}
+		if len(badEng) > 0 {
+			msg += " 注意：本次涉及非事务引擎（" + strings.Join(badEng, "、") + "），这些表上的改动无法回滚。"
 		}
 		return res, i, msg, time.Since(start).Milliseconds()
 	}
@@ -1025,10 +1107,12 @@ func runStatements(ds DataSource, stmts []string, dry bool) (map[string]stmtResu
 	}
 
 	if dry {
-		_ = tx.Rollback()
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			return res, -1, "预演的回滚可能没有完成（" + rbErr.Error() + "）：数据可能已被改动，请先人工核对，不要直接执行。", time.Since(start).Milliseconds()
+		}
 	} else if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
-		return res, -1, err.Error(), time.Since(start).Milliseconds()
+		// 提交那一刻断线，服务端有可能已经提交成功。只说「失败」会让用户直接重跑。
+		return res, -1, "提交结果未知（" + err.Error() + "）：服务器可能已经提交成功，请先人工核对数据，不要直接重跑。", time.Since(start).Milliseconds()
 	}
 	return res, -1, "", time.Since(start).Milliseconds()
 }
@@ -3512,10 +3596,17 @@ func preflight(ds DataSource, stmts []string, verColName string, verPfxs []strin
 			colList := strings.TrimSpace(m[2])
 			noteWrite(tgtSchema, target)
 			add(i, "ok", "目标表", target)
-			fm := reFrom.FindStringSubmatch(m[3])
-			if fm == nil || strings.HasPrefix(strings.ToLower(strings.TrimSpace(m[3])), "set") {
+			// 只有以 select 开头的才是 INSERT ... SELECT。
+			// VALUES / SET 里出现 from 是子查询或字符串，不能当源表。
+			head := strings.ToLower(strings.TrimSpace(m[3]))
+			if !strings.HasPrefix(head, "select") {
 				tolerant, tolerantHow := insertTolerant(st)
 				preflightInsertValues(db, schema, i, target, colList, m[3], pfSec, tolerant, tolerantHow, add)
+				continue
+			}
+			fm := reFrom.FindStringSubmatch(m[3])
+			if fm == nil {
+				add(i, "warn", "源表无法解析", "这条 INSERT ... SELECT 没解析出 FROM 表，跳过列数与主键核对")
 				continue
 			}
 			src := mResolveTable(db, schema, normTable(fm[1]))

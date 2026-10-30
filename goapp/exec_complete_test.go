@@ -374,3 +374,23 @@ func TestDDLAndTxnControlDetection(t *testing.T) {
 		}
 	}
 }
+
+// 执行前的引擎兜底检查必须带上库名：跨库写 MyISAM 时，
+// 拿当前库的同名表去查引擎会查不到，静默放过。
+func TestWriteTargetRefsKeepsSchema(t *testing.T) {
+	stmts := []string{
+		"UPDATE otherdb.t SET v = 1 WHERE id = 1",
+		"DELETE FROM shop.u WHERE id = 2",
+		"INSERT INTO dst VALUES (1)",
+	}
+	refs := writeTargetRefs(stmts, "cur")
+	got := map[string]bool{}
+	for _, r := range refs {
+		got[r.schema+"."+r.name] = true
+	}
+	for _, want := range []string{"otherdb.t", "shop.u", "cur.dst"} {
+		if !got[want] {
+			t.Fatalf("缺少目标表 %s，实际 %v", want, got)
+		}
+	}
+}

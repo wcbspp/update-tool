@@ -1860,12 +1860,21 @@ function toggleDs(e, id) {
   renderTree();
 }
 
+// 数据源行的键盘入口：Enter / 空格与点击走同一条路径（行里的「⋯」自己处理按键）
+function dsKey(e, id) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  if (e.target !== e.currentTarget) return;
+  e.preventDefault();
+  toggleDs(null, id);
+  // 折叠会重绘整棵树，聚焦的行被换掉了；不还回去的话第二次按 Enter 就没反应
+  const el = document.querySelector(`[data-key="d${id}"]`);
+  if (el) el.focus();
+}
+
 // 一个数据源自己的文件夹 + 单层脚本，挂在它下面（Navicat 那种分组）
 function dsChildrenHTML(dsId, q, depth) {
   const fs = FOLDERS.filter(f => (f.dsId || '') === dsId);
   const ss = ROOT_SCRIPTS.filter(sc => (sc.dsId || '') === dsId);
-  const shownF = fs.filter(f => subtreeMatch(f, q)).length;
-  const shownS = ss.filter(sc => !q || sc.name.toLowerCase().includes(q)).length;
   let h = foldersHTML(fs, depth, q);
   h += rootScriptsHTML(ss, q, depth + 1, false);
 
@@ -1907,7 +1916,7 @@ function dsNodeHTML(d, open) {
   const envTxt = d.env === 'test' ? '测试' : '生产';
   const st = DS_HEALTH[d.id] === 'ok' ? '正常' : DS_HEALTH[d.id] === 'fail' ? '失败' : '未检测';
   const tip = `${d.name}（${envTxt}）\n${d.user}@${d.host}:${d.port}/${d.database || ''}\n状态：${st}`;
-  return `<div class="node ds-row ${d.env === 'test' ? 'env-test' : 'env-prod'}" data-key="d${d.id}" role="treeitem" tabindex="0" aria-level="1" aria-expanded="${open ? 'true' : 'false'}" title="${esc(tip)}" onclick="toggleDs(event,'${d.id}')" style="padding-left:10px;padding-right:26px">
+  return `<div class="node ds-row ${d.env === 'test' ? 'env-test' : 'env-prod'}" data-key="d${d.id}" role="treeitem" tabindex="0" aria-level="1" aria-expanded="${open ? 'true' : 'false'}" title="${esc(tip)}" onclick="toggleDs(event,'${d.id}')" onkeydown="dsKey(event,'${d.id}')" style="padding-left:10px;padding-right:26px">
       <span class="chev ${open ? 'open' : ''}">▶</span>
       <span class="ico">${iconFor('d')}</span>
       <span class="dot ${DS_HEALTH[d.id] === 'ok' ? 'ok' : DS_HEALTH[d.id] === 'fail' ? 'fail' : ''}"></span>

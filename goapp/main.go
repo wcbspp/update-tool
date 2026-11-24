@@ -1001,7 +1001,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.1.9"
+const appVersion = "1.1.10"
 
 type cell = any
 

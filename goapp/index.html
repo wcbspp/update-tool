@@ -26,10 +26,16 @@
   .search input:focus{outline:none;border-color:#37507a;}
 
 
-  .tree::-webkit-scrollbar,.res::-webkit-scrollbar,.hl::-webkit-scrollbar,.edta::-webkit-scrollbar{width:9px;height:9px;}
-
-
+  .tree::-webkit-scrollbar,.res::-webkit-scrollbar,.hl::-webkit-scrollbar,.edta::-webkit-scrollbar,
+  .dlg::-webkit-scrollbar,.gscroll::-webkit-scrollbar,#dlgMsg::-webkit-scrollbar{width:9px;height:9px;}
+  .tree::-webkit-scrollbar-track,.res::-webkit-scrollbar-track,.hl::-webkit-scrollbar-track,.edta::-webkit-scrollbar-track,
+  .dlg::-webkit-scrollbar-track,.gscroll::-webkit-scrollbar-track,#dlgMsg::-webkit-scrollbar-track{background:transparent;}
+  /* 原生箭头又白又丑，直接去掉；拇指用圆角、留 2px 透明边，看起来细一点 */
+  .tree::-webkit-scrollbar-button,.res::-webkit-scrollbar-button,.hl::-webkit-scrollbar-button,.edta::-webkit-scrollbar-button,
+  .dlg::-webkit-scrollbar-button,.gscroll::-webkit-scrollbar-button,#dlgMsg::-webkit-scrollbar-button{display:none;height:0;}
   .tree::-webkit-scrollbar-thumb,.res::-webkit-scrollbar-thumb{background:#2a3342;border-radius:6px;}
+  .dlg::-webkit-scrollbar-thumb,.gscroll::-webkit-scrollbar-thumb,#dlgMsg::-webkit-scrollbar-thumb{background:#2a3342;border-radius:6px;border:2px solid transparent;background-clip:padding-box;}
+  .dlg::-webkit-scrollbar-thumb:hover,.gscroll::-webkit-scrollbar-thumb:hover,#dlgMsg::-webkit-scrollbar-thumb:hover{background:#3a4659;background-clip:padding-box;}
 
 
   .node .chev{width:11px;text-align:center;color:#5b6577;font-size:8px;flex:none;transition:transform .12s;}
@@ -308,7 +314,7 @@
   .dlg.wide{width:720px;display:flex;flex-direction:column;padding:14px 14px 10px;max-height:78vh;overflow:hidden;}
 
 
-  .dlg.wide .gscroll{flex:1;min-height:0;overflow:auto;padding-right:8px;}
+  .dlg.wide .gscroll{flex:1;min-height:0;overflow-y:auto;overflow-x:auto;padding-right:8px;}
 
 
   .dlg.wide h3{flex:none;}
@@ -597,7 +603,7 @@
   .stmt{border-bottom:1px solid #161b24;border-bottom-color:#1e2836;}
 
 
-  .dlg{width:400px;max-height:88vh;overflow:auto;border:1px solid var(--line2);border-radius:10px;padding:16px 16px 12px;box-shadow:0 30px 90px -24px #000, inset 0 1px 0 rgba(255,255,255,.07);background:linear-gradient(180deg,#101722,#0a0f16);border-color:#3a4659;}
+  .dlg{width:400px;max-height:88vh;overflow-y:auto;overflow-x:hidden;overflow-wrap:anywhere;border:1px solid var(--line2);border-radius:10px;padding:16px 16px 12px;box-shadow:0 30px 90px -24px #000, inset 0 1px 0 rgba(255,255,255,.07);background:linear-gradient(180deg,#101722,#0a0f16);border-color:#3a4659;}
 
 /* ================= 结果区：可读性 + 可点击跳转 ================= */
 

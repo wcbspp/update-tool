@@ -26,5 +26,8 @@ run-log.jsonl
 # 构建时间戳（每次构建都变，不入库）
 build_id.txt
 
+# 表结构导出（内部资料，不入库）
+ddl-2107/
+
 # 守卫词表（含内部关键词，不入库）
 .githooks/.blocklist

@@ -1066,6 +1066,16 @@
     .foot button{min-height:36px;padding:0 14px;}
   }
 </style>
+<style>
+  /* 首屏防闪：JS 把标题名、目录树、当前脚本填好之前先不显示。
+     否则刷新会闪一下「update-tool」空壳（未渲染的原始页面）。 */
+  html.booting body{visibility:hidden}
+</style>
+<script>
+  /* 内联、阻塞执行：保证在第一次绘制前就把类挂上。5 秒兜底，脚本万一报错也不至于白屏。 */
+  document.documentElement.classList.add('booting');
+  setTimeout(function(){ document.documentElement.classList.remove('booting'); }, 5000);
+</script>
 </head>
 <body>
 <header>
@@ -3611,6 +3621,11 @@ function initResizer() {
 })();
 
 /* ================= 启动 ================= */
+// 首屏防闪的收尾：界面填好了才把 body 显示出来（见头部的 html.booting 规则）
+function unboot() {
+  try { document.documentElement.classList.remove('booting'); } catch (e) {}
+}
+
 (async function boot() {
   initResizer();
   paint();
@@ -3652,7 +3667,7 @@ function initResizer() {
       });
     }, 20000);
     fetch('/api/health').then(r => r.json()).then(h => {
-      if (!h || !h.build) return;
+      if (!h || !h.build) { unboot(); return; }   // 拿不到版本也要把页面放出来，别等 5 秒兜底
       BOOTED_BUILD = h.build;
       const vtag = $('verTag');
       if (h.version) APP_VERSION = h.version;
@@ -3669,13 +3684,15 @@ function initResizer() {
         vtxt.textContent = 'v' + h.version + ' · 创意 by 吴美丽';
         vtag.style.visibility = 'visible';
       }
+      unboot();          // 标题名 / 版本号都就位了，可以显示
     }).catch(() => {
       const vtag2 = $('verTag'), vtxt2 = $('verText');
       if (vtxt2 && !vtxt2.textContent) { vtxt2.textContent = 'v? · 创意 by 吴美丽'; }
       if (vtag2) vtag2.style.visibility = 'visible';
+      unboot();
     });
 
-  } catch (e) { toast('初始化失败：' + e.message, 'bad'); }
+  } catch (e) { unboot(); toast('初始化失败：' + e.message, 'bad'); }
 })();
 
 // 输入法组字期间不重绘，组完再画一次（否则候选词会被打断）

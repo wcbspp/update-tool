@@ -18,6 +18,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"io/fs"
 	"log"
@@ -1000,7 +1001,7 @@ func openDB(ds DataSource) (*sql.DB, error) {
 	return db, nil
 }
 
-const appVersion = "1.1.7"
+const appVersion = "1.1.9"
 
 type cell = any
 
@@ -5183,6 +5184,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			http.Error(w, "index.html 缺失", 500)
 			return
+		}
+		// 标题按当前名字直接吐出去：模板里写死的是 update-tool。
+		// 注意别拿 defaultAppName 当占位符判断——发布包的 defaultAppName 已被
+		// -X main.defaultAppName 注入成中文名，一比就会跳过替换，标题继续闪 update-tool。
+		mu.Lock()
+		name := appNameOf(loadStore())
+		mu.Unlock()
+		if name != "" && name != "update-tool" {
+			b = bytes.Replace(b, []byte("<title>update-tool</title>"),
+				[]byte("<title>"+html.EscapeString(name)+"</title>"), 1)
 		}
 		w.Header().Set("content-type", "text/html; charset=utf-8")
 		w.Header().Set("cache-control", "no-store")

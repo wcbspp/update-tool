@@ -90,6 +90,36 @@ func TestAPIPages(t *testing.T) {
 	}
 }
 
+// 页面标题要跟着当前应用名走：模板里写死 update-tool，靠服务端替换
+func TestAPIPageTitleFollowsAppName(t *testing.T) {
+	setupHome(t)
+	if m := mustOK(t, call(t, http.MethodPost, "/api/settings", map[string]any{"appName": "测试用名"})); m["ok"] != true {
+		t.Fatalf("设置应用名失败：%v", m)
+	}
+	rec := call(t, http.MethodGet, "/", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("首页期望 200，实际 %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<title>测试用名</title>") {
+		t.Fatalf("首页标题没换成应用名")
+	}
+	if strings.Contains(body, "<title>update-tool</title>") {
+		t.Fatalf("首页仍返回模板里的默认标题")
+	}
+
+	// 发布包的情况：名字是 -X 注入的 defaultAppName，设置里没存 appName。
+	// 老代码拿 defaultAppName 当占位符比较，这里会跳过替换，标题继续是 update-tool。
+	old := defaultAppName
+	defaultAppName = "注入名"
+	defer func() { defaultAppName = old }()
+	mustOK(t, call(t, http.MethodPost, "/api/settings", map[string]any{"appName": ""}))
+	body2 := call(t, http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(body2, "<title>注入名</title>") {
+		t.Fatalf("注入默认名时标题没换：%s", body2[:200])
+	}
+}
+
 func TestAPIUnknownPath404(t *testing.T) {
 	setupHome(t)
 	rec := call(t, http.MethodGet, "/api/不存在", nil)
